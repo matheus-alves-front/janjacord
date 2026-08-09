@@ -21,6 +21,12 @@ interface WindowApi {
   callJoin: (channelId: string) => Promise<{ ok: boolean; data?: { participants: string[] }; error?: { message: string } }>;
   callLeave: (channelId: string) => Promise<unknown>;
   callSignal: (channelId: string, to: string, payload: unknown) => Promise<unknown>;
+  memberAction: (identityId: string, action: "kick" | "ban") => Promise<{ ok: boolean; error?: { message: string } }>;
+  createRole: (name: string, level: number, permissions: string[]) => Promise<{ ok: boolean; error?: { message: string } }>;
+  assignRole: (memberIdentityId: string, roleId: string) => Promise<{ ok: boolean; error?: { message: string } }>;
+  updateServerConfig: (config: Record<string, unknown>) => Promise<{ ok: boolean; error?: { message: string } }>;
+  listInvites: () => Promise<{ ok: boolean; data?: unknown[]; error?: { message: string } }>;
+  revokeInvite: (inviteId: string) => Promise<{ ok: boolean; error?: { message: string } }>;
   inviteCreate: () => Promise<{ ok: boolean; data?: { inviteKey: string }; error?: { message: string } }>;
   hostUrl: () => Promise<string>;
   on: (channel: string, cb: (data: unknown) => void) => void;

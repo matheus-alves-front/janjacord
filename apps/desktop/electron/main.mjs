@@ -7,8 +7,13 @@
 import { app, BrowserWindow, ipcMain, session } from "electron";
 
 // smoke: isola userData (identidades recriadas a cada execução geram dbKeys novas)
-if (process.env.JC_SMOKE_UI && process.env.JC_SMOKE_DIR) {
+if ((process.env.JC_SMOKE_UI || process.env.JC_SMOKE_MEDIA || process.env.JC_SMOKE_MEDIA_PEER) && process.env.JC_SMOKE_DIR) {
   app.setPath("userData", path.join(process.env.JC_SMOKE_DIR, "userdata"));
+}
+// smoke media: dispositivos sintéticos do Chromium (sem hardware)
+if (process.env.JC_SMOKE_MEDIA || process.env.JC_SMOKE_MEDIA_PEER) {
+  app.commandLine.appendSwitch("use-fake-ui-for-media-stream");
+  app.commandLine.appendSwitch("use-fake-device-for-media-stream");
 }
 import { fork } from "node:child_process";
 import path from "node:path";
@@ -21,6 +26,7 @@ import {
 } from "@janjacord/identity";
 import { createCipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import { createLinkSession } from "@janjacord/identity";
+import { parseInviteKey } from "@janjacord/crypto";
 import { EncryptedDatabase } from "@janjacord/persistence";
 import { HostClient } from "@janjacord/networking";
 import { buildEnvelope } from "@janjacord/protocol";
@@ -303,7 +309,31 @@ function registerIpc() {
 
   ipcMain.handle("server.join", async (_e, { hostUrl, inviteKey }) => {
     if (!identity) return { ok: false, error: { code: "unauthorized", message: "identity required" } };
-    const connected = await connectToHost(hostUrl);
+    // descoberta via rendezvous quando possível (invite carrega serverId)
+    const parsed = parseInviteKey(inviteKey);
+    let target = hostUrl;
+    if (parsed && process.env.JC_RENDEZVOUS_URL) {
+      try {
+        const { WebSocket } = await import("ws");
+        const ws = new WebSocket(process.env.JC_RENDEZVOUS_URL);
+        await new Promise((res, rej) => {
+          ws.on("open", res);
+          ws.on("error", rej);
+          setTimeout(() => rej(new Error("rendezvous timeout")), 5000);
+        });
+        const resolved = await new Promise((res) => {
+          ws.on("message", (raw) => res(JSON.parse(raw.toString())));
+          ws.send(JSON.stringify({ type: "resolve", serverId: parsed.serverId }));
+          setTimeout(() => res({ ok: false, error: { code: "timeout", message: "rendezvous timeout" } }), 5000);
+        });
+        ws.close();
+        if (resolved.ok && resolved.data?.endpoint) target = resolved.data.endpoint;
+        else return { ok: false, error: { code: "host_offline", message: "server não encontrado no rendezvous (host offline?)" } };
+      } catch (e) {
+        return { ok: false, error: { code: "rendezvous", message: `falha no rendezvous: ${(e).message}` } };
+      }
+    }
+    const connected = await connectToHost(target);
     if (!connected) return { ok: false, error: { code: "host_offline", message: "host não respondeu" } };
     client.send("hello", { identityId: identity.identityId });
     await new Promise((r) => setTimeout(r, 300));
@@ -435,6 +465,26 @@ function registerIpc() {
 
   ipcMain.handle("host.url", () => `ws://127.0.0.1:${HOST_PORT}/signal`);
 
+  ipcMain.handle("member.action", async (_e, { identityId, action }) => {
+    if (action === "kick") return sendCommand({ type: "member.kick", memberIdentityId: identityId });
+    return sendCommand({ type: "member.ban", memberIdentityId: identityId });
+  });
+  ipcMain.handle("role.create", async (_e, { name, level, permissions }) => {
+    return sendCommand({ type: "role.create", name, level, permissions });
+  });
+  ipcMain.handle("role.assign", async (_e, { memberIdentityId, roleId }) => {
+    return sendCommand({ type: "role.assign", memberIdentityId, roleId });
+  });
+  ipcMain.handle("server.updateConfig", async (_e, { config }) => {
+    return sendCommand({ type: "server.updateConfig", config });
+  });
+  ipcMain.handle("invite.list", async () => {
+    return sendCommand({ type: "invite.list" });
+  });
+  ipcMain.handle("invite.revoke", async (_e, { inviteId }) => {
+    return sendCommand({ type: "invite.revoke", inviteId });
+  });
+
   ipcMain.handle("linking.create", async () => {
     if (!identity) return { ok: false, error: { code: "unauthorized", message: "identity required" } };
     const session = createLinkSession(identity.seed);
@@ -507,6 +557,19 @@ async function runUiSmoke(win) {
     await new Promise((r) => setTimeout(r, 1200));
     await shot("04-message");
   }
+  // admin UI: abre configurações e navega pelos tabs
+  await js(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('⚙'))?.click()`);
+  await new Promise((r) => setTimeout(r, 1200));
+  await shot("05-settings-members");
+  await js(`[...document.querySelectorAll('button')].find(b => b.textContent === 'Roles')?.click()`);
+  await new Promise((r) => setTimeout(r, 800));
+  await shot("06-settings-roles");
+  await js(`[...document.querySelectorAll('button')].find(b => b.textContent === 'Configurações')?.click()`);
+  await new Promise((r) => setTimeout(r, 800));
+  await shot("07-settings-config");
+  await js(`[...document.querySelectorAll('button')].find(b => b.textContent === 'Convites')?.click()`);
+  await new Promise((r) => setTimeout(r, 800));
+  await shot("08-settings-invites");
   console.log("[smoke-ui] DONE");
   app.quit();
 }
@@ -517,7 +580,193 @@ async function getServerStateForSmoke() {
   return fresh?.ok ? fresh.data : serverState;
 }
 
+// ---------------------------------------------------------------- smoke media
+async function runMediaSmoke(win) {
+  const fs = await import("node:fs");
+  const dir = process.env.JC_SMOKE_DIR ?? "/tmp";
+  const js = (code) => win.webContents.executeJavaScript(code);
+  const shot = async (name) => {
+    await new Promise((r) => setTimeout(r, 1200));
+    fs.mkdirSync(dir, { recursive: true });
+    const img = await win.webContents.capturePage();
+    fs.writeFileSync(path.join(dir, `media-${name}.png`), img.toPNG());
+    console.log(`[smoke-media] screenshot ${name}`);
+  };
+  // pré-cria identidade e entra no fluxo até o server (reusa helpers)
+  identity = await createIdentity("media", "senha-media-123", vaultPath());
+  initLocalDb();
+  await loadMls();
+  win.reload();
+  await new Promise((r) => setTimeout(r, 1500));
+  await js(`(() => {
+    const input = document.querySelector('input[type="password"]');
+    if (!input) return false;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(input, 'senha-media-123');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`);
+  await new Promise((r) => setTimeout(r, 300));
+  await js(`document.querySelector('button')?.click()`);
+  await new Promise((r) => setTimeout(r, 1500));
+  await js(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('Criar server'))?.click()`);
+  await new Promise((r) => setTimeout(r, 3500));
+  // cria canal de call e abre
+  const st = await getServerStateForSmoke();
+  const chRes = await sendCommand({ type: "channel.create", channelType: "call", name: "geral-call" });
+  if (chRes.ok) {
+    // recarrega para o renderer obter o estado atualizado (com o canal de call)
+    win.reload();
+    await new Promise((r) => setTimeout(r, 1500));
+    await js(`(() => {
+      const input = document.querySelector('input[type="password"]');
+      if (!input) return false;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(input, 'senha-media-123');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    await new Promise((r) => setTimeout(r, 300));
+    await js(`document.querySelector('button')?.click()`);
+    await new Promise((r) => setTimeout(r, 2000));
+    await js(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('geral-call'))?.click()`);
+    await new Promise((r) => setTimeout(r, 4000)); // join + getUserMedia
+    await shot("01-call-media");
+    const text = await js(`document.body.innerText.slice(0, 200)`);
+    console.log(`[smoke-media] call UI: ${JSON.stringify(text)}`);
+    // verifica stream local ativo
+    const hasStream = await js(`!!window.janjacordMediaSmoke`);
+    void hasStream;
+  }
+  console.log("[smoke-media] DONE");
+  app.quit();
+}
+
+// ---------------------------------------------------------------- smoke media peer (mesh 2 peers)
+async function runMediaPeerSmoke(win) {
+  const fs = await import("node:fs");
+  const dir = process.env.JC_SMOKE_DIR ?? "/tmp";
+  const js = (code) => win.webContents.executeJavaScript(code);
+  const shot = async (name) => {
+    await new Promise((r) => setTimeout(r, 2500));
+    fs.mkdirSync(dir, { recursive: true });
+    const img = await win.webContents.capturePage();
+    fs.writeFileSync(path.join(dir, `peer${process.env.JC_SMOKE_MEDIA_PEER}-${name}.png`), img.toPNG());
+    const text = await js(`document.body.innerText.slice(0, 300)`);
+    console.log(`[smoke-media-peer${process.env.JC_SMOKE_MEDIA_PEER}] ${name} | ${JSON.stringify(text)}`);
+  };
+  const unlock = async (pw) => {
+    await js(`(() => {
+      const input = document.querySelector('input[type="password"]');
+      if (!input) return false;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(input, '${pw}');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    await new Promise((r) => setTimeout(r, 300));
+    await js(`document.querySelector('button')?.click()`);
+    await new Promise((r) => setTimeout(r, 2000));
+  };
+  const peer = process.env.JC_SMOKE_MEDIA_PEER;
+  const pw = `senha-peer-${peer}`;
+
+  identity = await createIdentity(`peer${peer}`, pw, vaultPath());
+  initLocalDb();
+  await loadMls();
+
+  if (peer === "1") {
+    // cria o host e o canal de call via main (sem depender do renderer)
+    spawnHost();
+    await new Promise((r) => setTimeout(r, 1800));
+    await connectToHost(`ws://127.0.0.1:${HOST_PORT}/signal`);
+    client.send("hello", { identityId: identity.identityId });
+    await new Promise((r) => setTimeout(r, 600));
+    const st = await sendCommand({ type: "server.state" });
+    if (!st.ok) throw new Error("host sem estado");
+    serverState = st.data;
+    await sendCommand({ type: "channel.create", channelType: "call", name: "geral-call" });
+    // renderer: reload → unlock → main (com o canal call) → abre a call
+    win.reload();
+    await new Promise((r) => setTimeout(r, 1800));
+    await unlock(pw);
+    await js(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('geral-call'))?.click()`);
+    await new Promise((r) => setTimeout(r, 5000)); // join + getUserMedia fake
+    await shot("in-call");
+    const inv = await sendCommand({ type: "invite.create", initialRoleId: "role-member", maxUses: 1 });
+    if (inv.ok) fs.writeFileSync(process.env.JC_INVITE_FILE ?? path.join(dir, "invite.txt"), inv.data.inviteKey);
+    console.log("[smoke-media-peer1] aguardando peer 2…");
+    await new Promise((r) => setTimeout(r, 30000));
+    await shot("final");
+    app.quit();
+  } else {
+    // entra via invite (descoberta no rendezvous) + call
+    const invitePath = process.env.JC_INVITE_FILE ?? path.join(dir, "invite.txt");
+    let tries = 0;
+    while (!fs.existsSync(invitePath) && tries < 25) {
+      await new Promise((r) => setTimeout(r, 1000));
+      tries++;
+    }
+    if (!fs.existsSync(invitePath)) throw new Error("invite do peer 1 não encontrado");
+    const inviteKey = fs.readFileSync(invitePath, "utf8").trim();
+    const { parseInviteKey } = await import("@janjacord/crypto");
+    const parsed = parseInviteKey(inviteKey);
+    let target = null;
+    if (parsed && process.env.JC_RENDEZVOUS_URL) {
+      const { WebSocket } = await import("ws");
+      const ws = new WebSocket(process.env.JC_RENDEZVOUS_URL);
+      await new Promise((res, rej) => { ws.on("open", res); ws.on("error", rej); });
+      const resolved = await new Promise((res) => {
+        ws.on("message", (raw) => res(JSON.parse(raw.toString())));
+        ws.send(JSON.stringify({ type: "resolve", serverId: parsed.serverId }));
+        setTimeout(() => res({ ok: false }), 5000);
+      });
+      ws.close();
+      if (resolved.ok) target = resolved.data.endpoint;
+    }
+    if (!target) throw new Error("rendezvous não resolveu o peer 1");
+    await connectToHost(target);
+    client.send("hello", { identityId: identity.identityId });
+    await new Promise((r) => setTimeout(r, 600));
+    const joinRes = await sendCommand({ type: "server.join", inviteKey });
+    if (!joinRes.ok) throw new Error(`join falhou: ${joinRes.error?.message}`);
+    serverState = joinRes.data;
+    win.reload();
+    await new Promise((r) => setTimeout(r, 1800));
+    await unlock(pw);
+    await js(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('geral-call'))?.click()`);
+    await new Promise((r) => setTimeout(r, 7000)); // join + getUserMedia + mesh
+    await shot("in-call");
+    await new Promise((r) => setTimeout(r, 10000));
+    await shot("final");
+    app.quit();
+  }
+}
+
 // ---------------------------------------------------------------- janela
+function setupAutoUpdater() {
+  if (process.env.JC_DISABLE_UPDATES === "1") return;
+  try {
+    // electron-updater é CJS; no main ESM usa createRequire
+    const { createRequire } = await_import_module();
+    const require2 = createRequire(import.meta.url);
+    const { autoUpdater } = require2("electron-updater");
+    autoUpdater.autoDownload = true;
+    autoUpdater.on("update-downloaded", () => {
+      console.log("[updater] atualização baixada — reiniciando na saída");
+      autoUpdater.quitAndInstall();
+    });
+    autoUpdater.on("error", (err) => console.warn("[updater]", err.message));
+    setTimeout(() => autoUpdater.checkForUpdatesAndNotify().catch(() => {}), 30000);
+  } catch (e) {
+    console.warn("[updater] não configurado (dev build):", (e).message);
+  }
+}
+
+async function await_import_module() {
+  return { createRequire: (await import("node:module")).createRequire };
+}
+
 function createWindow() {
   // permissões de mídia: permite camera/mic para a origin local do app (ADR/Electron security)
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback, details) => {
@@ -549,12 +798,19 @@ function createWindow() {
   if (process.env.JC_SMOKE_UI) {
     win.webContents.once("did-finish-load", () => runUiSmoke(win));
   }
+  if (process.env.JC_SMOKE_MEDIA) {
+    win.webContents.once("did-finish-load", () => runMediaSmoke(win));
+  }
+  if (process.env.JC_SMOKE_MEDIA_PEER) {
+    win.webContents.once("did-finish-load", () => runMediaPeerSmoke(win));
+  }
   return win;
 }
 
 app.whenReady().then(() => {
   registerIpc();
   createWindow();
+  setupAutoUpdater();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

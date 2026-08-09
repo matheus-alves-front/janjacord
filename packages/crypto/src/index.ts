@@ -107,19 +107,35 @@ function fromBase32(input: string): Buffer {
   return Buffer.from(out);
 }
 
-/** Invite key legível: JC1-XXXX-XXXX-... (128 bits, base32 sem padding). */
-export function formatInviteKey(secret: Buffer): string {
-  const b32 = toBase32(secret);
-  const groups = (b32.match(/.{1,4}/g) ?? []).slice(0, 8);
+/** Invite key: JC1-<serverId-b32>-<secret-b32> (serverId + secret de 128 bits, base32). */
+export function formatInviteKey(serverId: string, secret: Buffer): string {
+  const sid = Buffer.from(serverId.replace(/-/g, ""), "hex");
+  const b32 = toBase32(sid) + toBase32(secret);
+  const groups = (b32.match(/.{1,4}/g) ?? []).slice(0, 16);
   return ["JC1", ...groups].join("-");
 }
 
-export function parseInviteKey(key: string): Buffer | null {
+export interface ParsedInvite {
+  serverId: string;
+  secret: Buffer;
+}
+
+/** serverId (16B) e secret (16B) → base32 de 26 chars cada (padrão fixo). */
+const INVITE_SEGMENT_CHARS = 26;
+
+export function parseInviteKey(key: string): ParsedInvite | null {
   const m = key.trim().match(/^JC1-([A-Za-z2-7]+(?:-[A-Za-z2-7]+)*)$/);
   if (!m) return null;
   try {
-    const buf = fromBase32(m[1]!.replace(/-/g, ""));
-    return buf.length >= 16 ? buf : null;
+    const compact = m[1]!.replace(/-/g, "");
+    if (compact.length !== INVITE_SEGMENT_CHARS * 2) return null;
+    // decodifica cada segmento separadamente (evita vazamento de bits de padding)
+    const sidBytes = fromBase32(compact.slice(0, INVITE_SEGMENT_CHARS));
+    const secretBytes = fromBase32(compact.slice(INVITE_SEGMENT_CHARS));
+    if (sidBytes.length !== 16 || secretBytes.length !== 16) return null;
+    const h = sidBytes.toString("hex");
+    const serverId = `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+    return { serverId, secret: Buffer.from(secretBytes) };
   } catch {
     return null;
   }

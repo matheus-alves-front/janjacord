@@ -88,6 +88,23 @@ export class ServerService {
 
   // ------------------------------------------------------------------ state
 
+  updateConfig(actorId: string, patch: Record<string, unknown>): HostResult<Record<string, unknown>> {
+    const actor = this.getMember(actorId);
+    if (!actor) return fail("forbidden", "not a member");
+    const actorRole = this.getRole(actor.role_id)!;
+    if (!evaluatePermission(this.memberContext(actor), actorRole, null, "manage_server")) {
+      return fail("forbidden", "no manage_server");
+    }
+    const cur = this.getConfig();
+    const next = { ...cur, ...patch };
+    this.store.raw
+      .prepare("INSERT INTO server_meta (key, value) VALUES ('config', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(JSON.stringify(next));
+    this.store.appendOp({ type: "updateConfig", patch });
+    this.events.emit("stateChanged");
+    return ok(next);
+  }
+
   getConfig(): Record<string, unknown> {
     const row = this.store.raw.prepare("SELECT value FROM server_meta WHERE key = 'config'").get() as
       | { value: string }
@@ -98,7 +115,16 @@ export class ServerService {
   getState(identityId: string): HostResult<Record<string, unknown>> {
     const member = this.getMember(identityId);
     if (!member) return fail("forbidden", "not a member");
-    const roles = this.allRows("roles") as unknown as Role[];
+    const rawRoles = this.allRows("roles") as unknown as {
+      id: string; name: string; level: number; permissions: string; created_at: number;
+    }[];
+    const roles: Role[] = rawRoles.map((r) => ({
+      id: r.id,
+      name: r.name,
+      level: r.level,
+      permissions: JSON.parse(r.permissions) as Role["permissions"],
+      created_at: r.created_at,
+    }));
     const rawChannels = this.allRows("channels") as unknown as {
       id: string; type: string; name: string; overrides: string; created_at: number;
     }[];
@@ -170,6 +196,14 @@ export class ServerService {
     return t;
   }
 
+  getServerId(): string {
+    return this.serverId;
+  }
+
+  getEpochPublic(): number {
+    return this.getEpoch();
+  }
+
   private serverKey(): Buffer {
     const row = this.store.raw.prepare("SELECT value FROM server_meta WHERE key = 'server_key'").get() as { value: string };
     return Buffer.from(row.value, "hex");
@@ -184,7 +218,10 @@ export class ServerService {
   joinByInvite(identityId: string, nickname: string, secret: string): HostResult<Record<string, unknown>> {
     if (this.getMember(identityId)) return fail("conflict", "already a member");
     if (this.isBanned(identityId)) return fail("banned", "identity banned from this server");
-    const secretBytes = parseInviteKey(secret) ?? Buffer.from(secret);
+    const parsed = parseInviteKey(secret);
+    if (!parsed) return fail("invalid_invite", "invite malformado");
+    if (parsed.serverId !== this.serverId) return fail("invalid_invite", "invite de outro server");
+    const secretBytes = parsed.secret;
     const hash = sha256Hex(createHmac("sha256", this.serverKey()).update(secretBytes).digest());
     const invite = this.store.raw
       .prepare("SELECT * FROM invites WHERE secret_hash = ?")
@@ -256,7 +293,7 @@ export class ServerService {
       .run(id, hash, initialRoleId, maxUses, expiresInMs ? Date.now() + expiresInMs : null, Date.now());
     this.store.appendOp({ type: "inviteCreate", inviteId: id });
     this.events.emit("stateChanged");
-    return ok({ inviteKey: formatInviteKey(secret) });
+    return ok({ inviteKey: formatInviteKey(this.serverId, secret) });
   }
 
   inviteRevoke(actorId: string, inviteId: string): HostResult<null> {
@@ -435,6 +472,7 @@ export class ServerService {
     for (const r of recipients) {
       if (r !== actorId) this.events.emit("deliver", r, envelope);
     }
+    this.events.emit("activity");
     return ok(null);
   }
 

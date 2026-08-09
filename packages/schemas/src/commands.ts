@@ -97,6 +97,7 @@ export const HostCommandSchema = z.discriminatedUnion("type", [
   // replicação (ADR-011): snapshot do DB cifrado + promoção com epoch
   z.object({ type: z.literal("replica.snapshot") }),
   z.object({ type: z.literal("replica.promote") }),
+  z.object({ type: z.literal("replica.ping") }),
   // attachments (chunks cifrados spoolados; asset key viaja no ciphertext MLS)
   z.object({ type: z.literal("attachment.upload"), assetId: uuidSchema, data: z.string().min(1), sizeBytes: z.number().int().positive(), ttlHours: z.number().int().positive().optional() }),
   z.object({ type: z.literal("attachment.download"), assetId: uuidSchema }),

@@ -13,6 +13,44 @@ import { ServerService } from "./server.service.js";
 export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer() server!: unknown;
   private identities = new Map<WebSocket, string>();
+  private malformedCount = new Map<WebSocket, { count: number; windowStart: number }>();
+  private connectionIps = new Map<WebSocket, string>();
+  private ipConnections = new Map<string, number>();
+  private readonly MAX_MALFORMED_PER_MIN = 20;
+  private readonly MAX_CONNECTIONS_PER_IP = 8;
+
+  private trackMalformed(client: WebSocket): void {
+    const now = Date.now();
+    const cur = this.malformedCount.get(client);
+    const bucket = !cur || now - cur.windowStart > 60_000 ? { count: 1, windowStart: now } : { count: cur.count + 1, windowStart: cur.windowStart };
+    this.malformedCount.set(client, bucket);
+    if (bucket.count > this.MAX_MALFORMED_PER_MIN) {
+      console.warn(`[janjanode] malformed flood — encerrando socket`);
+      client.close(1008, "rate_limited");
+      this.malformedCount.delete(client);
+    }
+  }
+
+  private acceptConnection(client: WebSocket): boolean {
+    const ip = ((client as unknown as { _socket?: { remoteAddress?: string } })._socket?.remoteAddress ?? "").replace(/^::ffff:/, "");
+    const cur = this.ipConnections.get(ip) ?? 0;
+    if (cur >= this.MAX_CONNECTIONS_PER_IP) {
+      client.close(1013, "too many connections");
+      return false;
+    }
+    this.ipConnections.set(ip, cur + 1);
+    this.connectionIps.set(client, ip);
+    return true;
+  }
+
+  private releaseConnection(client: WebSocket): void {
+    const ip = this.connectionIps.get(client);
+    if (ip) {
+      this.ipConnections.set(ip, Math.max(0, (this.ipConnections.get(ip) ?? 1) - 1));
+      this.connectionIps.delete(client);
+    }
+    this.malformedCount.delete(client);
+  }
 
   constructor(private readonly serverService: ServerService) {}
 
@@ -45,14 +83,19 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
   }
 
   handleConnection(client: WebSocket): void {
+    if (!this.acceptConnection(client)) return;
     this.identities.set(client, "");
     client.on("message", (raw) => {
+      let frame: { event?: string; data?: unknown };
       try {
-        const frame = JSON.parse(raw.toString()) as { event?: string; data?: unknown };
-        this.handleFrame(client, frame);
+        frame = JSON.parse(raw.toString()) as { event?: string; data?: unknown };
+        if (!frame || typeof frame !== "object") throw new Error("malformed");
       } catch {
-        // frame malformado: ignora (anti-abuso)
+        // frame malformado: conta como abuso e ignora
+        this.trackMalformed(client);
+        return;
       }
+      this.handleFrame(client, frame);
     });
   }
 
@@ -60,6 +103,7 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
     const id = this.identities.get(client);
     if (id) this.serverService.setPresence(id, "offline");
     this.identities.delete(client);
+    this.releaseConnection(client);
   }
 
   private identityOf(client: WebSocket): string {
@@ -148,7 +192,7 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
       case "server.transferOwnership":
         return svc.transferOwnership(identityId, cmd.newOwnerIdentityId);
       case "server.updateConfig":
-        return { ok: true, data: { ...svc.getConfig(), ...cmd.config } };
+        return svc.updateConfig(identityId, cmd.config);
       case "invite.create":
         return svc.inviteCreate(identityId, cmd.initialRoleId, cmd.maxUses, cmd.expiresInMs);
       case "invite.revoke":
@@ -191,9 +235,12 @@ export class SignalingGateway implements OnGatewayConnection, OnGatewayDisconnec
       case "attachment.download":
         return svc.attachmentDownload(identityId, cmd.assetId);
       case "replica.snapshot":
+        console.log("[janjanode] replica.snapshot pedido");
         return svc.getSnapshot();
       case "replica.promote":
         return svc.promote(identityId);
+      case "replica.ping":
+        return { ok: true, data: { epoch: svc.getEpochPublic(), serverId: svc.getServerId() } };
       default: {
         const exhaustive: never = cmd;
         return { ok: false, error: { code: "invalid_input", message: `unhandled ${(exhaustive as { type: string }).type}` } };

@@ -3,9 +3,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 interface ServerState {
   serverId: string;
   serverName: string;
-  config?: { networkPrivacy?: "direct" | "relay" };
+  config?: { networkPrivacy?: "direct" | "relay"; maxRetentionHours?: number };
   channels: { id: string; type: string; name: string }[];
-  members: { identityId: string; nickname: string; presence: string }[];
+  members: { identityId: string; nickname: string; roleId: string; presence: string }[];
+  roles: { id: string; name: string; level: number; permissions: string[] }[];
   me: { identityId: string; nickname: string; roleId: string };
 }
 
@@ -20,6 +21,7 @@ interface Message {
 }
 
 import { CallView } from "./CallView";
+import { ServerSettings } from "./ServerSettings";
 import type { CallSignal } from "../webrtc";
 
 export function Main({ identity, recoveryKey }: { identity: { identityId: string; nickname: string } | null; recoveryKey: string | null }) {
@@ -36,6 +38,7 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
   const [busySend, setBusySend] = useState(false);
   const [qrData, setQrData] = useState<string | null>(null);
   const [qrPayload, setQrPayload] = useState<string | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -229,7 +232,9 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
       <div className="flex w-56 flex-col border-r border-zinc-800 bg-zinc-900/40">
         <div className="border-b border-zinc-800 px-4 py-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-white">{server?.serverName}</h2>
+            <button className="text-sm font-semibold text-white hover:text-zinc-300" onClick={() => setShowSettings(true)} title="Configurações do server">
+              {server?.serverName} ⚙
+            </button>
             <button className="text-xs text-zinc-500 hover:text-zinc-300" onClick={makeInvite} title="Criar convite">
               + invite
             </button>
@@ -267,6 +272,7 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
           </div>
         </div>
       </div>
+      {showSettings && server && <ServerSettings server={server} onClose={() => setShowSettings(false)} />}
       {/* conversa */}
       <div className="flex flex-1 flex-col bg-zinc-950">
         <div className="border-b border-zinc-800 px-4 py-3">
