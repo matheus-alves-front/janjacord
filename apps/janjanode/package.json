@@ -1,0 +1,40 @@
+{
+  "name": "@janjacord/janjanode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "ts-node src/main.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@janjacord/crypto": "workspace:*",
+    "@janjacord/networking": "workspace:*",
+    "@janjacord/permissions": "workspace:*",
+    "@janjacord/persistence": "workspace:*",
+    "@janjacord/protocol": "workspace:*",
+    "@janjacord/schemas": "workspace:*",
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/platform-express": "^11.1.28",
+    "@nestjs/platform-ws": "^11.0.0",
+    "@nestjs/websockets": "^11.0.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.0",
+    "ws": "^8.18.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.5.0",
+    "ts-node": "^10.9.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  }
+}

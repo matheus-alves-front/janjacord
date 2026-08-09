@@ -1,0 +1,26 @@
+{
+  "name": "@janjacord/crypto-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./pkg/janjacord_mls.js",
+  "types": "./pkg/janjacord_mls.d.ts",
+  "exports": {
+    ".": {
+      "types": "./pkg/janjacord_mls.d.ts",
+      "import": "./pkg/janjacord_mls.js",
+      "require": "./pkg/janjacord_mls.js"
+    }
+  },
+  "scripts": {
+    "build": "export PATH=\"$HOME/.cargo/bin:$PATH\" && wasm-pack build --target nodejs --release",
+    "test": "vitest run",
+    "typecheck": "echo 'wasm package - skipped'"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0"
+  },
+  "files": [
+    "pkg"
+  ]
+}

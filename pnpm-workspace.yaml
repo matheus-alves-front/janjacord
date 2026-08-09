@@ -1,0 +1,10 @@
+packages:
+  - apps/*
+  - packages/*
+
+# Native modules com prebuilds (aprovados explicitamente — necessários para SQLCipher e
+# node-datachannel) e esbuild (bundler do tsup)
+onlyBuiltDependencies:
+  - better-sqlite3-multiple-ciphers
+  - node-datachannel
+  - esbuild

@@ -1,0 +1,14 @@
+{
+  "expo": {
+    "name": "JanjaCord",
+    "slug": "janjacord",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "plugins": [
+      "@config-plugins/react-native-webrtc",
+      ["expo-sqlite", { "useSQLCipher": true }],
+      ["expo-secure-store", { "configureAndroidBackup": true }]
+    ]
+  }
+}

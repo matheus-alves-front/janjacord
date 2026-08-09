@@ -1,0 +1,23 @@
+{
+  "name": "janjacord",
+  "private": true,
+  "version": "0.1.0",
+  "description": "JanjaCord — comunicador privado de comunidades, invite-only, E2EE, efemero, user-hosted",
+  "packageManager": "pnpm@10.25.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "rebuild:native": "electron-builder install-app-deps"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "turbo": "^2.5.0",
+    "typescript": "^5.8.0"
+  }
+}
