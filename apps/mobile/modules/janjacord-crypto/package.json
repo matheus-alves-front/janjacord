@@ -1,0 +1,7 @@
+{
+  "name": "janjacord-crypto",
+  "version": "0.1.0",
+  "description": "Módulo nativo JanjaCord: MLS (UniFFI) para React Native",
+  "main": "index.ts",
+  "private": true
+}

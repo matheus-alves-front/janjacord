@@ -1,6 +1,7 @@
 // Módulo nativo JanjaCord Crypto (MLS via UniFFI → libjanjacord_mobile.so).
 // Compila o crate Rust para Android com cargo-ndk (NDK) e expõe ao React Native.
 apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
 
 def ndkVersion = "27.0.12077973"
 def rustTargets = ["arm64-v8a", "armeabi-v7a", "x86_64"]
@@ -12,15 +13,33 @@ android {
         minSdkVersion 24
         targetSdkVersion 35
     }
+    sourceSets {
+        main {
+            jniLibs.srcDirs += ["src/main/jniLibs"]
+        }
+    }
     externalNativeBuild {
         // nenhum build nativo via CMake — usamos cargo-ndk em task separada
     }
 }
 
+// Localiza o binário cargo (PATH ou ~/.cargo/bin — Unix e Windows).
+def findCargo() {
+    def win = System.getProperty('os.name').toLowerCase().contains('win')
+    if (win) {
+        def home = System.getenv('USERPROFILE')
+        def p = home ? new File(home, ".cargo\\bin\\cargo.cmd") : null
+        return (p != null && p.exists()) ? p.absolutePath : "cargo.cmd"
+    }
+    def p = new File(System.getProperty('user.home'), ".cargo/bin/cargo")
+    return p.exists() ? p.absolutePath : "cargo"
+}
+
 // Compila o Rust → .so por ABI (requer: Rust, cargo-ndk, NDK).
 task cargoNdkBuild(type: Exec) {
-    def rustRoot = file("../../../../packages/crypto-mobile").absolutePath
+    def rustRoot = file("../../../../../packages/crypto-mobile").absolutePath
     def outDir = file("src/main/jniLibs")
+    def cargoBin = findCargo()
     doFirst {
         outDir.mkdirs()
         for (abi in rustTargets) {
@@ -28,8 +47,14 @@ task cargoNdkBuild(type: Exec) {
         }
     }
     workingDir rustRoot
-    commandLine "cargo", "ndk", "-t", "arm64-v8a", "-t", "armeabi-v7a", "-t", "x86_64",
+    commandLine cargoBin, "ndk", "-t", "arm64-v8a", "-t", "armeabi-v7a", "-t", "x86_64",
         "-o", "${outDir.absolutePath}", "build", "--release"
 }
 
 preBuild.dependsOn cargoNdkBuild
+
+dependencies {
+    implementation("com.facebook.react:react-android")
+    // JNA roda no Android (AAR com libs nativas); o binding UniFFI Kotlin usa JNA.
+    implementation("net.java.dev.jna:jna:5.16.0@aar")
+}

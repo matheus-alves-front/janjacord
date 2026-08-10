@@ -36,7 +36,7 @@ class JanjacordCryptoModule(reactContext: ReactApplicationContext) :
         safe(promise) { addMember(seedHex, identityId, groupIdHex, keyPackageB64) }
 
     @ReactMethod fun removeMember(seedHex: String, identityId: String, groupIdHex: String, leafIndex: Int, promise: Promise) =
-        safe(promise) { removeMember(seedHex, identityId, groupIdHex, leafIndex) }
+        safe(promise) { removeMember(seedHex, identityId, groupIdHex, leafIndex.toUInt()) }
 
     @ReactMethod fun processCommit(seedHex: String, identityId: String, groupIdHex: String, commitB64: String, promise: Promise) =
         safe(promise) { processCommit(seedHex, identityId, groupIdHex, commitB64); null }
