@@ -6,6 +6,11 @@
  */
 import { app, BrowserWindow, ipcMain, session } from "electron";
 
+// userData custom: permite rodar 2+ instâncias no mesmo PC (teste de 2 contas)
+if (process.env.JC_USERDATA_DIR) {
+  app.setPath("userData", process.env.JC_USERDATA_DIR);
+}
+
 // smoke: isola userData (identidades recriadas a cada execução geram dbKeys novas)
 if ((process.env.JC_SMOKE_UI || process.env.JC_SMOKE_MEDIA || process.env.JC_SMOKE_MEDIA_PEER) && process.env.JC_SMOKE_DIR) {
   app.setPath("userData", path.join(process.env.JC_SMOKE_DIR, "userdata"));
@@ -388,6 +393,10 @@ function registerIpc() {
 
   ipcMain.handle("invite.create", async () => {
     return sendCommand({ type: "invite.create", initialRoleId: "role-member", maxUses: 1 });
+  });
+
+  ipcMain.handle("channel.create", async (_e, { channelType, name }) => {
+    return sendCommand({ type: "channel.create", channelType, name });
   });
 
   ipcMain.handle("attachment.send", async (_e, { channelId, name, mimeType, dataB64 }) => {

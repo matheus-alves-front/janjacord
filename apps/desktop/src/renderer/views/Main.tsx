@@ -49,6 +49,7 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
       setMessages((prev) => ({ ...prev, [m.channelId]: [...(prev[m.channelId] ?? []), m] }));
     });
     window.janjacord.on("member.presence", () => refreshState());
+    window.janjacord.on("server.stateChanged", () => refreshState());
     window.janjacord.serverState().then((r) => {
       if (r.ok && r.data) {
         setServer(r.data as ServerState);
@@ -272,7 +273,15 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
           </div>
         </div>
       </div>
-      {showSettings && server && <ServerSettings server={server} onClose={() => setShowSettings(false)} />}
+      {showSettings && server && (
+        <ServerSettings
+          server={server}
+          onClose={() => {
+            setShowSettings(false);
+            refreshState();
+          }}
+        />
+      )}
       {/* conversa */}
       <div className="flex flex-1 flex-col bg-zinc-950">
         <div className="border-b border-zinc-800 px-4 py-3">

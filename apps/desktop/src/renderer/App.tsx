@@ -27,6 +27,7 @@ interface WindowApi {
   updateServerConfig: (config: Record<string, unknown>) => Promise<{ ok: boolean; error?: { message: string } }>;
   listInvites: () => Promise<{ ok: boolean; data?: unknown[]; error?: { message: string } }>;
   revokeInvite: (inviteId: string) => Promise<{ ok: boolean; error?: { message: string } }>;
+  channelCreate: (channelType: "text" | "call", name: string) => Promise<{ ok: boolean; error?: { message: string } }>;
   inviteCreate: () => Promise<{ ok: boolean; data?: { inviteKey: string }; error?: { message: string } }>;
   hostUrl: () => Promise<string>;
   on: (channel: string, cb: (data: unknown) => void) => void;

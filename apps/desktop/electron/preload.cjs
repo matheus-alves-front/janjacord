@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld("janjacord", {
   serverState: () => ipcRenderer.invoke("server.state"),
   sendMessage: (channelId, text) => ipcRenderer.invoke("message.send", { channelId, text }),
   inviteCreate: () => ipcRenderer.invoke("invite.create"),
+  channelCreate: (channelType, name) => ipcRenderer.invoke("channel.create", { channelType, name }),
   hostUrl: () => ipcRenderer.invoke("host.url"),
   linkingCreate: () => ipcRenderer.invoke("linking.create"),
   memberAction: (identityId, action) => ipcRenderer.invoke("member.action", { identityId, action }),

@@ -13,7 +13,7 @@
     }
   },
   "scripts": {
-    "build": "export PATH=\"$HOME/.cargo/bin:$PATH\" && wasm-pack build --target nodejs --release",
+    "build": "node scripts/build.mjs",
     "test": "vitest run",
     "typecheck": "echo 'wasm package - skipped'"
   },

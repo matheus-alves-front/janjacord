@@ -1,0 +1,12 @@
+{
+  "name": "janjacord-mls",
+  "description": "JanjaCord MLS wrapper (wasm-bindgen) — group E2EE via mls-rs",
+  "version": "0.1.0",
+  "files": [
+    "janjacord_mls_bg.wasm",
+    "janjacord_mls.js",
+    "janjacord_mls.d.ts"
+  ],
+  "main": "janjacord_mls.js",
+  "types": "janjacord_mls.d.ts"
+}

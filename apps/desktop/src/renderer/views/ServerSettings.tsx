@@ -39,7 +39,7 @@ const PERMISSION_LABELS: Record<string, string> = {
   remove_from_call: "Remover da call",
 };
 
-type Tab = "members" | "roles" | "settings" | "invites";
+type Tab = "members" | "roles" | "settings" | "invites" | "channels";
 
 export function ServerSettings({ server, onClose }: { server: ServerState; onClose: () => void }) {
   const [tab, setTab] = useState<Tab>("members");
@@ -51,6 +51,8 @@ export function ServerSettings({ server, onClose }: { server: ServerState; onClo
   const [newRoleName, setNewRoleName] = useState("");
   const [newRoleLevel, setNewRoleLevel] = useState(10);
   const [newRolePerms, setNewRolePerms] = useState<string[]>([]);
+  const [newChannelName, setNewChannelName] = useState("");
+  const [newChannelType, setNewChannelType] = useState<"text" | "call">("call");
 
   const loadInvites = async () => {
     const r = await window.janjacord.listInvites();
@@ -89,6 +91,7 @@ export function ServerSettings({ server, onClose }: { server: ServerState; onClo
             [
               ["members", "Membros"],
               ["roles", "Roles"],
+              ["channels", "Canais"],
               ["settings", "Configurações"],
               ["invites", "Convites"],
             ] as [Tab, string][]
@@ -218,6 +221,50 @@ export function ServerSettings({ server, onClose }: { server: ServerState; onClo
                   </p>
                 </div>
               ))}
+            </div>
+          )}
+
+          {tab === "channels" && (
+            <div className="space-y-3">
+              <div className="flex gap-2">
+                <input
+                  className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200"
+                  placeholder="Nome do canal (ex.: Geral)"
+                  value={newChannelName}
+                  onChange={(e) => setNewChannelName(e.target.value)}
+                />
+                <select
+                  className="rounded border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-300"
+                  value={newChannelType}
+                  onChange={(e) => setNewChannelType(e.target.value as "text" | "call")}
+                >
+                  <option value="call">🔊 Voz</option>
+                  <option value="text"># Texto</option>
+                </select>
+                <button
+                  className="rounded bg-indigo-600 px-3 text-xs text-white hover:bg-indigo-500 disabled:opacity-40"
+                  disabled={busy || !newChannelName.trim()}
+                  onClick={() =>
+                    run(
+                      () => window.janjacord.channelCreate(newChannelType, newChannelName.trim()),
+                      () => {
+                        setNewChannelName("");
+                        onClose(); // fecha — o Main re-busca o estado e mostra o canal
+                      },
+                    )
+                  }
+                >
+                  Criar
+                </button>
+              </div>
+              <div className="space-y-1">
+                {server.channels.map((c) => (
+                  <div key={c.id} className="rounded-md border border-zinc-800 px-3 py-1.5 text-sm text-zinc-300">
+                    {c.type === "text" ? "# " : "🔊 "}
+                    {c.name}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
