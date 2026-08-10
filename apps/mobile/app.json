@@ -33,6 +33,12 @@
       ],
       "package": "com.maththugalves.janjacord"
     },
-    "main": "index.ts"
+    "main": "index.ts",
+    "owner": "maththugalves",
+    "extra": {
+      "eas": {
+        "projectId": "749b0a3f-aeba-4be6-8743-92fa88957bf7"
+      }
+    }
   }
 }
