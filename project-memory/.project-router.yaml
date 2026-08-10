@@ -1,0 +1,22 @@
+# Memory router — workspace: janjacord
+
+workspace_id: janjacord
+alias: janjacord
+active: true
+project_mode: projeto-novo
+repos:
+  - path: janjacord
+    role: product
+    status: registered-not-created
+    note: >
+      Monorepo alvo (pnpm + Turborepo). Nao criar nesta operacao de definicao.
+      Criar somente quando a implementacao (Phase 5) for autorizada.
+tags: [projeto-novo, app-mensagens, privacy-first, e2ee, self-hosted]
+memory_root: .memory
+teams: [core, development, product, design, ai, blackops]
+workflows_root: .memory/workflows
+capabilities_root: .memory/capabilities
+notes: >
+  JanjaCord — comunicador privado de comunidades, invite-only, desktop+mobile.
+  Definicao de produto congelada em 2026-08-09 (heavy-task, product-criacao-de-projeto-novo).
+  Nenhum codigo de produto fora de workspaces/janjacord/janjacord/.
