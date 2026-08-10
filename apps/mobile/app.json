@@ -32,6 +32,7 @@
         "android.permission.BLUETOOTH"
       ],
       "package": "com.maththugalves.janjacord"
-    }
+    },
+    "main": "index.ts"
   }
 }

@@ -6,7 +6,7 @@
  */
 import * as Crypto from "expo-crypto";
 import * as SecureStore from "expo-secure-store";
-import { argon2id } from "@noble/hashes/argon2";
+import { argon2id } from "@noble/hashes/argon2.js";
 
 const KEY = "janjacord:identity";
 const B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";

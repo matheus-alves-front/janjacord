@@ -184,6 +184,12 @@ importers:
       '@janjacord/schemas':
         specifier: workspace:*
         version: link:../../packages/schemas
+      '@noble/hashes':
+        specifier: ^2.3.0
+        version: 2.3.0
+      buffer:
+        specifier: ^6.0.3
+        version: 6.0.3
       expo:
         specifier: ~54.0.0
         version: 54.0.36(@babel/core@7.29.7)(react-native@0.81.0(@babel/core@7.29.7)(@react-native/metro-config@0.86.2(@babel/core@7.29.7))(@types/react@19.0.14)(react@19.0.0))(react@19.0.0)(typescript@5.9.3)
