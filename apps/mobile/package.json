@@ -15,7 +15,6 @@
     "@janjacord/networking": "workspace:*",
     "@janjacord/protocol": "workspace:*",
     "@janjacord/schemas": "workspace:*",
-    "@noble/hashes": "^2.3.0",
     "buffer": "^6.0.3",
     "expo": "~54.0.0",
     "expo-crypto": "~15.0.0",

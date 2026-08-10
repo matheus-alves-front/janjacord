@@ -184,9 +184,6 @@ importers:
       '@janjacord/schemas':
         specifier: workspace:*
         version: link:../../packages/schemas
-      '@noble/hashes':
-        specifier: ^2.3.0
-        version: 2.3.0
       buffer:
         specifier: ^6.0.3
         version: 6.0.3
