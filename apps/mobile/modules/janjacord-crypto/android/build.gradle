@@ -36,10 +36,27 @@ def findCargo() {
 }
 
 // Compila o Rust → .so por ABI (requer: Rust, cargo-ndk, NDK).
+// CI/EAS (sem Rust): os .so versionados em src/main/jniLibs já estão presentes → skip.
 task cargoNdkBuild(type: Exec) {
     def rustRoot = file("../../../../../packages/crypto-mobile").absolutePath
     def outDir = file("src/main/jniLibs")
     def cargoBin = findCargo()
+    onlyIf {
+        def prebuilt = rustTargets.every { abi ->
+            new File(outDir, "$abi/libjanjacord_mobile.so").exists()
+        }
+        if (prebuilt) {
+            logger.lifecycle("janjacord-crypto: .so pre-compilados presentes — pulando cargoNdkBuild")
+            return false
+        }
+        def cargoOk = cargoBin == "cargo" || new File(cargoBin).exists()
+        if (!cargoOk) {
+            throw new GradleException(
+                "janjacord-crypto: cargo nao encontrado e .so ausentes. " +
+                "Instale Rust + cargo-ndk (dev) ou commite os .so gerados (CI).")
+        }
+        return true
+    }
     doFirst {
         outDir.mkdirs()
         for (abi in rustTargets) {

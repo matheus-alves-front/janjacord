@@ -1,6 +1,3 @@
 
 # Projeto Android gerado pelo prebuild (regenerável)
 android/
-
-# .so compilado pelo cargoNdkBuild (regenerado no build)
-modules/janjacord-crypto/android/src/main/jniLibs/
