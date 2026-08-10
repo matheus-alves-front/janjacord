@@ -7,7 +7,7 @@
     "start": "expo start --dev-client",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "typecheck": "echo 'mobile: build requer Android SDK/device (blocker externo) — code pronto em src/App.tsx'"
+    "typecheck": "echo 'mobile: build requer Android SDK/device (blocker externo) \u2014 code pronto em src/App.tsx'"
   },
   "dependencies": {
     "@janjacord/crypto": "workspace:*",
@@ -21,7 +21,6 @@
     "expo-crypto": "~15.0.0",
     "expo-dev-client": "~6.0.0",
     "expo-secure-store": "~15.0.0",
-    "expo-sqlite": "~16.0.0",
     "react": "19.0.0",
     "react-native": "0.81.0",
     "react-native-quick-crypto": "^1.0.0",

@@ -8,12 +8,6 @@
     "plugins": [
       "@config-plugins/react-native-webrtc",
       [
-        "expo-sqlite",
-        {
-          "useSQLCipher": true
-        }
-      ],
-      [
         "expo-secure-store",
         {
           "configureAndroidBackup": true
