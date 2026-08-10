@@ -1,0 +1,35 @@
+// Módulo nativo JanjaCord Crypto (MLS via UniFFI → libjanjacord_mobile.so).
+// Compila o crate Rust para Android com cargo-ndk (NDK) e expõe ao React Native.
+apply plugin: 'com.android.library'
+
+def ndkVersion = "27.0.12077973"
+def rustTargets = ["arm64-v8a", "armeabi-v7a", "x86_64"]
+
+android {
+    namespace "br.janjacord.crypto"
+    compileSdkVersion 35
+    defaultConfig {
+        minSdkVersion 24
+        targetSdkVersion 35
+    }
+    externalNativeBuild {
+        // nenhum build nativo via CMake — usamos cargo-ndk em task separada
+    }
+}
+
+// Compila o Rust → .so por ABI (requer: Rust, cargo-ndk, NDK).
+task cargoNdkBuild(type: Exec) {
+    def rustRoot = file("../../../../packages/crypto-mobile").absolutePath
+    def outDir = file("src/main/jniLibs")
+    doFirst {
+        outDir.mkdirs()
+        for (abi in rustTargets) {
+            new File(outDir, abi).mkdirs()
+        }
+    }
+    workingDir rustRoot
+    commandLine "cargo", "ndk", "-t", "arm64-v8a", "-t", "armeabi-v7a", "-t", "x86_64",
+        "-o", "${outDir.absolutePath}", "build", "--release"
+}
+
+preBuild.dependsOn cargoNdkBuild

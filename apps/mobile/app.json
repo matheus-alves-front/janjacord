@@ -7,8 +7,19 @@
     "userInterfaceStyle": "dark",
     "plugins": [
       "@config-plugins/react-native-webrtc",
-      ["expo-sqlite", { "useSQLCipher": true }],
-      ["expo-secure-store", { "configureAndroidBackup": true }]
+      [
+        "expo-sqlite",
+        {
+          "useSQLCipher": true
+        }
+      ],
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": true
+        }
+      ],
+      "./plugins/withJanjacordCrypto"
     ]
   }
 }

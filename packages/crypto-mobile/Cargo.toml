@@ -1,0 +1,16 @@
+[package]
+name = "janjacord-mobile"
+version = "0.1.0"
+edition = "2021"
+description = "JanjaCord MLS bindings nativos (UniFFI → Kotlin/Swift) para React Native"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+janjacord-mls = { path = "../crypto-core" }
+thiserror = "2"
+uniffi = { version = "0.32", features = ["build"] }
+
+[build-dependencies]
+uniffi = { version = "0.32", features = ["build"] }
