@@ -61,7 +61,7 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        assertNativeCrypto();
+        await assertNativeCrypto();
         setPhase((await hasIdentity()) ? "unlock" : "onboarding");
       } catch (e) {
         setError((e as Error).message);

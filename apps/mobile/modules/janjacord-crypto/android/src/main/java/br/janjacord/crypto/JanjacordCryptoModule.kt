@@ -17,7 +17,15 @@ class JanjacordCryptoModule(reactContext: ReactApplicationContext) :
     override fun getName() = "JanjacordCrypto"
 
     private fun safe(promise: Promise, fn: () -> String?) {
-        try { promise.resolve(fn()) } catch (e: MlsException) { promise.reject("MLS_ERROR", e.message) }
+        try {
+            promise.resolve(fn())
+        } catch (e: MlsException) {
+            promise.reject("MLS_ERROR", e.message)
+        } catch (e: Throwable) {
+            // Qualquer erro da lib nativa (load/JNI/UniFFI) vira erro JS mostrado na
+            // UI — NUNCA deixa o app crashar silenciosamente no release.
+            promise.reject("NATIVE_ERROR", "${e.javaClass.simpleName}: ${e.message}")
+        }
     }
 
     @ReactMethod fun argon2id(password: String, saltHex: String, promise: Promise) =

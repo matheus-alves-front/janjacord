@@ -11,11 +11,18 @@ export function hasNativeCrypto(): boolean {
   return !!native;
 }
 
-export function assertNativeCrypto() {
+export async function assertNativeCrypto() {
   if (!native) {
     throw new Error(
       "Módulo nativo JanjacordCrypto ausente. Use um dev build (expo run:android), nunca o Expo Go."
     );
+  }
+  // Chama a lib de verdade (argon2 trivial) para validar o carregamento do .so no
+  // arranque — se a lib falhar, o erro aparece na tela em vez de crashar no clique.
+  try {
+    await native.argon2id("probe", "00000000000000000000000000000000");
+  } catch (e) {
+    throw new Error(`Módulo nativo não carregou: ${(e as Error).message}`);
   }
 }
 
