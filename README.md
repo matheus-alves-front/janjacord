@@ -85,10 +85,11 @@ cd apps/desktop && JC_USERDATA_DIR=/tmp/jc-conta2 node_modules/.bin/electron . -
 
 ### Testar entre 2 PCs (Linux + Windows)
 
-- Máquina A (host): rodar o app → criar server → anotar o convite `JC1-...`; liberar a porta
+- Máquina A (host): rodar o app → criar server → copiar o convite `JC2-...` (o convite já
+  carrega o endereço do host — IP local/Tailscale detectado automaticamente); liberar a porta
   **8931 TCP** no firewall (e UDP para a call)
-- Máquina B: rodar o app → criar identidade → "Entrar com convite" → colar o invite →
-  Host: `ws://<IP-da-máquina-A>:8931/signal`
+- Máquina B: rodar o app → criar identidade → "Entrar com convite" → **colar só o convite**
+  (um campo — o endereço vem embutido)
 
 ### Testes automatizados (smokes)
 
