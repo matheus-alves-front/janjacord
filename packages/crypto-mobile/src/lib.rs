@@ -26,6 +26,21 @@ macro_rules! mls_export {
     };
 }
 
+/// Argon2id (RFC 9106, v1.3, t=2, m=19456KiB, p=1, out 32) — mesmos parâmetros do
+/// desktop (noble-hashes) → hash idêntico. Roda nativo (RustCrypto) no celular,
+/// sem JS puro (Hermes) nem libs de terceiros no fluxo de identidade.
+#[uniffi::export]
+pub fn argon2id(password: String, salt_hex: String) -> Result<String, MlsError> {
+    let salt = hex::decode(&salt_hex).map_err(|e| MlsError::Message(format!("salt: {e}")))?;
+    let params = argon2::Params::new(19456, 2, 1, Some(32))
+        .map_err(|e| MlsError::Message(format!("params: {e}")))?;
+    let ctx = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+    let mut out = [0u8; 32];
+    ctx.hash_password_into(password.as_bytes(), &salt, &mut out)
+        .map_err(|e| MlsError::Message(format!("hash: {e}")))?;
+    Ok(hex::encode(out))
+}
+
 #[uniffi::export]
 pub fn generate_key_package(seed_hex: String, identity_id: String) -> Result<String, MlsError> {
     janjacord_mls::generate_key_package_inner(&seed_hex, &identity_id).map_err(MlsError::Message)

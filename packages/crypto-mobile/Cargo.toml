@@ -9,6 +9,8 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 janjacord-mls = { path = "../crypto-core" }
+argon2 = "0.5"
+hex = "0.4"
 thiserror = "2"
 uniffi = { version = "0.32", features = ["build"] }
 

@@ -674,6 +674,8 @@ internal object IntegrityCheckingUniffiLib {
     }
     external fun uniffi_janjacord_mobile_checksum_func_add_member(
     ): Int
+    external fun uniffi_janjacord_mobile_checksum_func_argon2id(
+    ): Int
     external fun uniffi_janjacord_mobile_checksum_func_create_group(
     ): Int
     external fun uniffi_janjacord_mobile_checksum_func_decrypt(
@@ -706,6 +708,8 @@ internal object UniffiLib {
         
     }
     external fun uniffi_janjacord_mobile_fn_func_add_member(`seedHex`: RustBuffer.ByValue,`identityId`: RustBuffer.ByValue,`groupIdHex`: RustBuffer.ByValue,`keyPackageB64`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_janjacord_mobile_fn_func_argon2id(`password`: RustBuffer.ByValue,`saltHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_janjacord_mobile_fn_func_create_group(`seedHex`: RustBuffer.ByValue,`identityId`: RustBuffer.ByValue,`groupIdHex`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -845,6 +849,9 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_janjacord_mobile_checksum_func_add_member() != 52177) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_janjacord_mobile_checksum_func_argon2id() != 13289) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_janjacord_mobile_checksum_func_create_group() != 33565) {
@@ -1121,6 +1128,24 @@ public object FfiConverterTypeMlsError : FfiConverterRustBuffer<MlsException> {
         FfiConverterString.lower(`identityId`),
         FfiConverterString.lower(`groupIdHex`),
         FfiConverterString.lower(`keyPackageB64`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Argon2id (RFC 9106, v1.3, t=2, m=19456KiB, p=1, out 32) — mesmos parâmetros do
+         * desktop (noble-hashes) → hash idêntico. Roda nativo (RustCrypto) no celular,
+         * sem JS puro (Hermes) nem libs de terceiros no fluxo de identidade.
+         */
+    @Throws(MlsException::class) fun `argon2id`(`password`: kotlin.String, `saltHex`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(MlsException) { _status ->
+    UniffiLib.uniffi_janjacord_mobile_fn_func_argon2id(
+    
+        
+        FfiConverterString.lower(`password`),
+        FfiConverterString.lower(`saltHex`),_status)
 }
     )
     }

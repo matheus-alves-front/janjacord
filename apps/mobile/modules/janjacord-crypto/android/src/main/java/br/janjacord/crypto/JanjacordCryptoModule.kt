@@ -20,6 +20,9 @@ class JanjacordCryptoModule(reactContext: ReactApplicationContext) :
         try { promise.resolve(fn()) } catch (e: MlsException) { promise.reject("MLS_ERROR", e.message) }
     }
 
+    @ReactMethod fun argon2id(password: String, saltHex: String, promise: Promise) =
+        safe(promise) { argon2id(password, saltHex) }
+
     @ReactMethod fun generateKeyPackage(seedHex: String, identityId: String, promise: Promise) =
         safe(promise) { generateKeyPackage(seedHex, identityId) }
 

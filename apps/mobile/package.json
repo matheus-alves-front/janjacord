@@ -22,7 +22,6 @@
     "expo-secure-store": "~15.0.0",
     "react": "19.0.0",
     "react-native": "0.81.0",
-    "react-native-quick-crypto": "^1.0.0",
     "react-native-webrtc": "^124.0.0"
   },
   "devDependencies": {

@@ -20,6 +20,7 @@ export function assertNativeCrypto() {
 }
 
 export const mls = {
+  argon2id: (password: string, saltHex: string) => native.argon2id(password, saltHex),
   generateKeyPackage: (seedHex: string, identityId: string) => native.generateKeyPackage(seedHex, identityId),
   createGroup: (seedHex: string, identityId: string, groupIdHex: string) => native.createGroup(seedHex, identityId, groupIdHex),
   importGroup: (identityId: string, groupIdHex: string, stateB64: string) => native.importGroup(identityId, groupIdHex, stateB64),

@@ -526,6 +526,8 @@ def _uniffi_check_contract_api_version(lib):
 def _uniffi_check_api_checksums(lib):
     if lib.uniffi_janjacord_mobile_checksum_func_add_member() != 52177:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_janjacord_mobile_checksum_func_argon2id() != 13289:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_janjacord_mobile_checksum_func_create_group() != 33565:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_janjacord_mobile_checksum_func_decrypt() != 7107:
@@ -576,6 +578,9 @@ _UniffiLib.ffi_janjacord_mobile_uniffi_contract_version.restype = ctypes.c_uint3
 _UniffiLib.uniffi_janjacord_mobile_checksum_func_add_member.argtypes = (
 )
 _UniffiLib.uniffi_janjacord_mobile_checksum_func_add_member.restype = ctypes.c_uint16
+_UniffiLib.uniffi_janjacord_mobile_checksum_func_argon2id.argtypes = (
+)
+_UniffiLib.uniffi_janjacord_mobile_checksum_func_argon2id.restype = ctypes.c_uint16
 _UniffiLib.uniffi_janjacord_mobile_checksum_func_create_group.argtypes = (
 )
 _UniffiLib.uniffi_janjacord_mobile_checksum_func_create_group.restype = ctypes.c_uint16
@@ -611,6 +616,12 @@ _UniffiLib.uniffi_janjacord_mobile_fn_func_add_member.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_janjacord_mobile_fn_func_add_member.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_janjacord_mobile_fn_func_argon2id.argtypes = (
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_janjacord_mobile_fn_func_argon2id.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_janjacord_mobile_fn_func_create_group.argtypes = (
     _UniffiRustBuffer,
     _UniffiRustBuffer,
@@ -816,6 +827,28 @@ def add_member(seed_hex: str,identity_id: str,group_id_hex: str,key_package_b64:
         *_uniffi_lowered_args,
     )
     return _uniffi_lift_return(_uniffi_ffi_result)
+def argon2id(password: str,salt_hex: str) -> str:
+    """
+    Argon2id (RFC 9106, v1.3, t=2, m=19456KiB, p=1, out 32) — mesmos parâmetros do
+    desktop (noble-hashes) → hash idêntico. Roda nativo (RustCrypto) no celular,
+    sem JS puro (Hermes) nem libs de terceiros no fluxo de identidade.
+"""
+    
+    _UniffiFfiConverterString.check_lower(password)
+
+    _UniffiFfiConverterString.check_lower(salt_hex)
+    _uniffi_lowered_args = (
+        _UniffiFfiConverterString.lower(password),
+        _UniffiFfiConverterString.lower(salt_hex),
+    )
+    _uniffi_lift_return = _UniffiFfiConverterString.lift
+    _uniffi_error_converter = _UniffiFfiConverterTypeMlsError
+    _uniffi_ffi_result = _uniffi_rust_call_with_error(
+        _uniffi_error_converter,
+        _UniffiLib.uniffi_janjacord_mobile_fn_func_argon2id,
+        *_uniffi_lowered_args,
+    )
+    return _uniffi_lift_return(_uniffi_ffi_result)
 def create_group(seed_hex: str,identity_id: str,group_id_hex: str) -> str:
     
     _UniffiFfiConverterString.check_lower(seed_hex)
@@ -1007,6 +1040,7 @@ __all__ = [
     "InternalError",
     "MlsError",
     "add_member",
+    "argon2id",
     "create_group",
     "decrypt",
     "encrypt",
