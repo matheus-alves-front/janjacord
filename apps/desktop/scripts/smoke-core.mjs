@@ -185,7 +185,7 @@ async function main() {
 
     console.log("[smoke-core] alice cria invite…");
     const inv = await alice.command({ type: "invite.create", initialRoleId: "role-member", maxUses: 1 });
-    assert(inv.ok && inv.data.inviteKey.startsWith("JC1-"), "invite JC1-… criado");
+    assert(inv.ok && /^JC[12]-/.test(inv.data.inviteKey), "invite JC1/JC2-… criado");
 
     console.log("[smoke-core] bob conecta e entra…");
     const bobHello = await bob.connect(`ws://127.0.0.1:${HOST_PORT}/signal`);

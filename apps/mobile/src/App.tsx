@@ -19,6 +19,7 @@ import {
 } from "react-native";
 import { hasIdentity, createIdentityMobile, unlockIdentityMobile, type MobileIdentity } from "./identity";
 import { HostClientRN } from "./networking";
+import { endpointFromInvite } from "./invite";
 import { mls, assertNativeCrypto } from "./crypto";
 
 const styles = StyleSheet.create({
@@ -48,7 +49,6 @@ export default function App() {
   const [identity, setIdentity] = useState<MobileIdentity | null>(null);
   const [nickname, setNickname] = useState("");
   const [password, setPassword] = useState("");
-  const [hostUrl, setHostUrl] = useState("ws://192.168.3.44:8931/signal");
   const [inviteKey, setInviteKey] = useState("");
   const [messages, setMessages] = useState<Msg[]>([]);
   const [draft, setDraft] = useState("");
@@ -75,8 +75,14 @@ export default function App() {
     setError(null);
     try {
       const id = identity!;
+      const endpoint = endpointFromInvite(inviteKey.trim());
+      if (!endpoint) {
+        throw new Error(
+          "Este convite não carrega o endereço do server (JC1). Peça um convite novo do host — o convite atual (JC2) já vem com tudo embutido."
+        );
+      }
       const client = new HostClientRN();
-      const hello = await client.connect(hostUrl.trim(), id.identityId);
+      const hello = await client.connect(endpoint, id.identityId);
       if (!(hello as { ok?: boolean })?.ok) throw new Error("host não respondeu o hello");
       const join = await client.request({ type: "server.join", inviteKey: inviteKey.trim() });
       if (!(join as { ok?: boolean })?.ok) throw new Error((join as { error?: { message?: string } }).error?.message ?? "join falhou");
@@ -194,9 +200,8 @@ export default function App() {
       {phase === "home" && (
         <ScrollView>
           <Text style={styles.title}>Servers</Text>
-          <Text style={styles.sub}>Entre com um convite do seu desktop (host self-hosted).</Text>
-          <TextInput style={styles.input} placeholder="Host (ws://IP:8931/signal)" placeholderTextColor="#5b616b" value={hostUrl} onChangeText={setHostUrl} autoCapitalize="none" />
-          <TextInput style={styles.input} placeholder="Invite key (JC1-…)" placeholderTextColor="#5b616b" value={inviteKey} onChangeText={setInviteKey} autoCapitalize="characters" />
+          <Text style={styles.sub}>Entre com um convite do seu desktop (host self-hosted). O convite já carrega o endereço — é só colar.</Text>
+          <TextInput style={styles.input} placeholder="Convite (JC2-…)" placeholderTextColor="#5b616b" value={inviteKey} onChangeText={setInviteKey} autoCapitalize="none" />
           <TouchableOpacity style={styles.button} disabled={busy} onPress={joinServer}>
             <Text style={styles.buttonText}>{busy ? "Entrando…" : "Entrar com convite"}</Text>
           </TouchableOpacity>

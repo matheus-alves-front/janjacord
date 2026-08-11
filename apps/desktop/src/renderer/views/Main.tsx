@@ -83,7 +83,8 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
   const joinServer = async () => {
     setBusy(true);
     setError(null);
-    const r = await window.janjacord.serverJoin(hostUrl.trim() || `ws://127.0.0.1:8931/signal`, joinKey.trim());
+    // o convite JC2 carrega o endereço do host — host manual é opcional/avançado
+    const r = await window.janjacord.serverJoin(hostUrl.trim(), joinKey.trim());
     setBusy(false);
     if (r.ok && r.data) {
       setServer(r.data as ServerState);
@@ -189,13 +190,13 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
           <div className="space-y-2 border-t border-zinc-800 pt-4">
             <input
               className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none focus:border-indigo-500"
-              placeholder={`Host (padrão: ${hostUrl || "ws://127.0.0.1:8931/signal"})`}
+              placeholder="Host (opcional — o convite JC2 já carrega o endereço)"
               value={hostUrl}
               onChange={(e) => setHostUrl(e.target.value)}
             />
             <input
               className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none focus:border-indigo-500"
-              placeholder="Invite key (JC1-…)"
+              placeholder="Convite (JC2-… ou JC1-…)"
               value={joinKey}
               onChange={(e) => setJoinKey(e.target.value)}
             />

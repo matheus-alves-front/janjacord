@@ -107,35 +107,47 @@ function fromBase32(input: string): Buffer {
   return Buffer.from(out);
 }
 
-/** Invite key: JC1-<serverId-b32>-<secret-b32> (serverId + secret de 128 bits, base32). */
-export function formatInviteKey(serverId: string, secret: Buffer): string {
+/**
+ * Invite key — autocontida (ADR: convite carrega o que precisa para entrar).
+ * - JC1: JC1-<serverId-b32>-<secret-b32> (sem endpoint — legado; exige host manual/rendezvous)
+ * - JC2: JC2-<endpointB32>-<serverId-b32>-<secret-b32> — endpoint "host:porta" viaja no
+ *   convite; o cliente monta ws://<endpoint>/signal. Um campo só para entrar.
+ */
+export function formatInviteKey(serverId: string, secret: Buffer, endpoint?: string): string {
   const sid = Buffer.from(serverId.replace(/-/g, ""), "hex");
-  const b32 = toBase32(sid) + toBase32(secret);
-  const groups = (b32.match(/.{1,4}/g) ?? []).slice(0, 16);
-  return ["JC1", ...groups].join("-");
+  const b32 = (endpoint ? toBase32(Buffer.from(endpoint, "utf8")) : "") + toBase32(sid) + toBase32(secret);
+  const groups = (b32.match(/.{1,4}/g) ?? []).slice(0, 32);
+  return [(endpoint ? "JC2" : "JC1"), ...groups].join("-");
 }
 
 export interface ParsedInvite {
   serverId: string;
   secret: Buffer;
+  /** endereço "host:porta" embutido no convite (JC2) — undefined em JC1. */
+  endpoint?: string;
 }
 
 /** serverId (16B) e secret (16B) → base32 de 26 chars cada (padrão fixo). */
 const INVITE_SEGMENT_CHARS = 26;
 
 export function parseInviteKey(key: string): ParsedInvite | null {
-  const m = key.trim().match(/^JC1-([A-Za-z2-7]+(?:-[A-Za-z2-7]+)*)$/);
+  const m = key.trim().match(/^JC([12])-([A-Za-z2-7]+(?:-[A-Za-z2-7]+)*)$/);
   if (!m) return null;
+  const version = m[1]!;
   try {
-    const compact = m[1]!.replace(/-/g, "");
-    if (compact.length !== INVITE_SEGMENT_CHARS * 2) return null;
-    // decodifica cada segmento separadamente (evita vazamento de bits de padding)
-    const sidBytes = fromBase32(compact.slice(0, INVITE_SEGMENT_CHARS));
-    const secretBytes = fromBase32(compact.slice(INVITE_SEGMENT_CHARS));
+    const compact = m[2]!.replace(/-/g, "");
+    if (version === "1" && compact.length !== INVITE_SEGMENT_CHARS * 2) return null;
+    if (version === "2" && compact.length < INVITE_SEGMENT_CHARS * 2) return null;
+    // serverId+secret = os 2 segmentos finais fixos; o que sobrar antes = endpoint (JC2)
+    const sidBytes = fromBase32(compact.slice(-INVITE_SEGMENT_CHARS * 2, -INVITE_SEGMENT_CHARS));
+    const secretBytes = fromBase32(compact.slice(-INVITE_SEGMENT_CHARS));
     if (sidBytes.length !== 16 || secretBytes.length !== 16) return null;
     const h = sidBytes.toString("hex");
     const serverId = `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
-    return { serverId, secret: Buffer.from(secretBytes) };
+    const epB32 = compact.slice(0, -INVITE_SEGMENT_CHARS * 2);
+    if (version === "2" && !epB32) return null;
+    const endpoint = epB32 ? fromBase32(epB32).toString("utf8") : undefined;
+    return { serverId, secret: Buffer.from(secretBytes), endpoint };
   } catch {
     return null;
   }

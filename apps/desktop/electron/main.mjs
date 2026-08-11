@@ -316,7 +316,8 @@ function registerIpc() {
     if (!identity) return { ok: false, error: { code: "unauthorized", message: "identity required" } };
     // descoberta via rendezvous quando possível (invite carrega serverId)
     const parsed = parseInviteKey(inviteKey);
-    let target = hostUrl;
+    // convite autocontido (JC2): o endpoint do host viaja no convite — um campo só
+    let target = hostUrl || (parsed?.endpoint ? `ws://${parsed.endpoint}/signal` : "");
     if (parsed && process.env.JC_RENDEZVOUS_URL) {
       try {
         const { WebSocket } = await import("ws");

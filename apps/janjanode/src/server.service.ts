@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { networkInterfaces } from "node:os";
 import { EventEmitter } from "node:events";
 import type { Channel, HostEvent, MessageEnvelope, Role } from "@janjacord/schemas";
 import { ROLE_LEVELS, PermissionFlagSchema } from "@janjacord/schemas";
@@ -293,7 +294,7 @@ export class ServerService {
       .run(id, hash, initialRoleId, maxUses, expiresInMs ? Date.now() + expiresInMs : null, Date.now());
     this.store.appendOp({ type: "inviteCreate", inviteId: id });
     this.events.emit("stateChanged");
-    return ok({ inviteKey: formatInviteKey(this.serverId, secret) });
+    return ok({ inviteKey: formatInviteKey(this.serverId, secret, detectHostEndpoint()) });
   }
 
   inviteRevoke(actorId: string, inviteId: string): HostResult<null> {
@@ -692,4 +693,19 @@ export class ServerService {
     this.events.emit("presence", identityId, state);
     return ok(null);
   }
+}
+
+/** Endpoint alcançável do host para o convite autocontido (JC2).
+ * Prioridade: Tailscale (100.x, estável entre redes) → primeiro IPv4 privado não-loopback. */
+function detectHostEndpoint(port = 8931): string | undefined {
+  const candidates: string[] = [];
+  for (const list of Object.values(networkInterfaces())) {
+    for (const i of list ?? []) {
+      if (i.family === "IPv4" && !i.internal) {
+        if (i.address.startsWith("100.")) candidates.unshift(i.address);
+        else candidates.push(i.address);
+      }
+    }
+  }
+  return candidates.length ? `${candidates[0]}:${port}` : undefined;
 }

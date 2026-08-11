@@ -41,5 +41,23 @@ describe("invite key", () => {
     expect(parseInviteKey("NAO-INVITE")).toBeNull();
     expect(parseInviteKey("JC1-")).toBeNull();
     expect(parseInviteKey("JC1-" + "A".repeat(10))).toBeNull(); // comprimento inválido
+
+    // JC2: convite autocontido (endpoint embutido)
+    const ep = "192.168.3.44:8931";
+    const key2 = formatInviteKey("00112233-4455-6677-8899-aabbccddeeff", Buffer.from("11223344556677881122334455667788", "hex"), ep);
+    expect(key2.startsWith("JC2-")).toBe(true);
+    const p2 = parseInviteKey(key2);
+    expect(p2).not.toBeNull();
+    expect(p2!.serverId).toBe("00112233-4455-6677-8899-aabbccddeeff");
+    expect(p2!.endpoint).toBe(ep);
+    expect(p2!.secret.toString("hex")).toBe("11223344556677881122334455667788");
+    // convite JC1 continua sem endpoint
+    const key1 = formatInviteKey("00112233-4455-6677-8899-aabbccddeeff", Buffer.from("11223344556677881122334455667788", "hex"));
+    expect(key1.startsWith("JC1-")).toBe(true);
+    const p1 = parseInviteKey(key1);
+    expect(p1!.endpoint).toBeUndefined();
+    // endpoint com tailscale (mais longo)
+    const key3 = formatInviteKey("00112233-4455-6677-8899-aabbccddeeff", Buffer.from("11223344556677881122334455667788", "hex"), "100.107.202.109:8931");
+    expect(parseInviteKey(key3)!.endpoint).toBe("100.107.202.109:8931");
   });
 });
