@@ -1,0 +1,90 @@
+name: Linux packaging test artifacts
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/linux-packaging-test.yml"
+      - "apps/desktop/**"
+      - "apps/janjanode/**"
+      - "packages/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/linux-packaging-test.yml"
+      - "apps/desktop/**"
+      - "apps/janjanode/**"
+      - "packages/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-packaging-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package-test:
+    name: Package and inspect AppImage and DEB
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      JANJACORD_SOURCE_FROZEN: "1"
+
+    steps:
+      - name: Checkout immutable workflow snapshot
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 10.25.0
+          run_install: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.17.0
+          cache: pnpm
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test Linux packaging provenance gates
+        working-directory: apps/desktop
+        run: |
+          node scripts/package-linux.mjs --self-test
+          node scripts/validate-desktop-artifacts.mjs --self-test
+
+      - name: Validate release configuration before build
+        run: pnpm --filter @janjacord/desktop run validate:release-config
+
+      - name: Package and validate Linux artifacts
+        run: pnpm --filter @janjacord/desktop run dist:linux
+
+      - name: Typecheck packaged desktop source
+        run: pnpm --filter @janjacord/desktop typecheck
+
+      - name: Create checksums
+        working-directory: apps/desktop/release
+        run: sha256sum -- *.AppImage *.deb > SHA256SUMS.txt
+
+      - name: Upload Linux test artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: TEST-ONLY-janjacord-linux-${{ github.sha }}
+          path: |
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.deb
+            apps/desktop/release/JanjaCord-source-*.tar
+            apps/desktop/release/JanjaCord-source-*.tar.sha256
+            apps/desktop/release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

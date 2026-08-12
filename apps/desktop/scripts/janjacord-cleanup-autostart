@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+case "${XDG_CONFIG_HOME:-}" in
+  "") config_home="${HOME:?HOME is required}/.config" ;;
+  /*) config_home=$XDG_CONFIG_HOME ;;
+  *) echo "Refusing relative XDG_CONFIG_HOME: $XDG_CONFIG_HOME" >&2; exit 2 ;;
+esac
+
+entry="$config_home/autostart/janjacord.desktop"
+case "$entry" in
+  "$HOME"/*) ;;
+  *) echo "Refusing cleanup outside the current user's home: $entry" >&2; exit 2 ;;
+esac
+
+if [ ! -e "$entry" ]; then
+  echo "No JanjaCord autostart entry for the current user: $entry"
+  exit 0
+fi
+if [ -L "$entry" ] || [ ! -f "$entry" ]; then
+  echo "Refusing to remove non-regular autostart entry: $entry" >&2
+  exit 2
+fi
+home_real=$(readlink -f -- "$HOME")
+entry_real=$(readlink -f -- "$entry")
+case "$entry_real" in
+  "$home_real"/*) ;;
+  *) echo "Refusing cleanup through a path that resolves outside the current user's home: $entry_real" >&2; exit 2 ;;
+esac
+if ! grep -Fqx 'X-JanjaCord-Autostart=true' "$entry" || ! grep -Fq -- '--background-host' "$entry"; then
+  echo "Refusing to remove an autostart entry not owned by JanjaCord: $entry" >&2
+  exit 2
+fi
+
+rm -- "$entry"
+echo "Removed JanjaCord autostart for the current user: $entry"

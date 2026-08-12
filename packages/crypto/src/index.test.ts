@@ -1,6 +1,21 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { randomBytes } from "node:crypto";
-import { deriveKEK, wrapKey, unwrapKey, formatInviteKey, parseInviteKey } from "../src/index.js";
+import {
+  canonicalJson,
+  createAuthenticatedCounterAnchor,
+  createAuthenticatedStoreEnvelope,
+  deriveKEK,
+  ed25519Fingerprint,
+  ed25519PublicKey,
+  formatInviteKey,
+  parseInviteKey,
+  signCanonicalPayload,
+  unwrapKey,
+  verifyCanonicalPayload,
+  verifyAuthenticatedCounterAnchor,
+  verifyAuthenticatedStoreEnvelope,
+  wrapKey,
+} from "../src/index.js";
 import * as mls from "@janjacord/crypto-core";
 
 // O crypto-core é WASM (CJS gerado pelo wasm-pack); inicialização lazy.
@@ -59,5 +74,44 @@ describe("invite key", () => {
     // endpoint com tailscale (mais longo)
     const key3 = formatInviteKey("00112233-4455-6677-8899-aabbccddeeff", Buffer.from("11223344556677881122334455667788", "hex"), "100.107.202.109:8931");
     expect(parseInviteKey(key3)!.endpoint).toBe("100.107.202.109:8931");
+  });
+});
+
+describe("assinaturas Ed25519 canônicas", () => {
+  it("assina payload canônico e rejeita adulteração ou outro domínio", () => {
+    const seed = Buffer.alloc(32, 7);
+    const publicKey = ed25519PublicKey(seed);
+    const payload = { z: [3, 2, 1], a: { y: true, x: "ok" } };
+    const signature = signCanonicalPayload(seed, "janjacord.test", payload);
+
+    expect(publicKey).toHaveLength(32);
+    expect(ed25519Fingerprint(publicKey)).toHaveLength(64);
+    expect(canonicalJson(payload)).toBe('{"a":{"x":"ok","y":true},"z":[3,2,1]}');
+    expect(verifyCanonicalPayload(publicKey, "janjacord.test", payload, signature)).toBe(true);
+    expect(verifyCanonicalPayload(publicKey, "janjacord.test", { ...payload, z: [1] }, signature)).toBe(false);
+    expect(verifyCanonicalPayload(publicKey, "janjacord.other", payload, signature)).toBe(false);
+  });
+
+  it("rejeita seed, chave e JSON não canônico inválidos", () => {
+    expect(() => ed25519PublicKey(Buffer.alloc(31))).toThrow(/32 bytes/);
+    expect(() => canonicalJson({ value: Number.NaN })).toThrow(/non-finite/);
+    expect(verifyCanonicalPayload(Buffer.alloc(31), "janjacord.test", {}, Buffer.alloc(64))).toBe(false);
+    const proto = JSON.parse('{"__proto__":{"admin":true},"text":"ação"}') as Record<string, unknown>;
+    expect(canonicalJson(proto)).toBe('{"__proto__":{"admin":true},"text":"ação"}');
+  });
+});
+
+describe("authenticated local store", () => {
+  it("detects payload, counter and anchor tampering or rollback mismatch", () => {
+    const key = Buffer.alloc(32, 33);
+    const envelope = createAuthenticatedStoreEnvelope(key, 4, { trust: ["bridge-a"] });
+    const anchor = createAuthenticatedCounterAnchor(key, envelope.counter, envelope.mac);
+
+    expect(verifyAuthenticatedStoreEnvelope(key, envelope)?.payload).toEqual({ trust: ["bridge-a"] });
+    expect(verifyAuthenticatedCounterAnchor(key, anchor, envelope.counter, envelope.mac)).toBe(true);
+    expect(verifyAuthenticatedStoreEnvelope(key, { ...envelope, payload: { trust: ["evil"] } })).toBeNull();
+    expect(verifyAuthenticatedStoreEnvelope(key, { ...envelope, counter: 3 })).toBeNull();
+    expect(verifyAuthenticatedCounterAnchor(key, anchor, 3, envelope.mac)).toBe(false);
+    expect(verifyAuthenticatedCounterAnchor(key, { ...anchor, storeMac: "00".repeat(32) }, envelope.counter, envelope.mac)).toBe(false);
   });
 });

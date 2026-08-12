@@ -4,6 +4,7 @@ declare module "better-sqlite3-multiple-ciphers" {
   interface CipherDatabase extends BetterSqlite3.Database {
     /** SQLCipher raw key (32B Buffer) — chamar após cipher='sqlcipher' + legacy=4. */
     key(key: Buffer): void;
+    rekey(key: Buffer): void;
     /** PRAGMA genérico (aceita string com aspas). */
     pragma(sql: string): unknown;
   }

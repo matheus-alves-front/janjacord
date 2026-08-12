@@ -6,6 +6,7 @@ import { wrapKey, unwrapKey } from "@janjacord/crypto";
 
 type Db = BetterSqlite3.Database & {
   key(key: Buffer): void;
+  rekey(key: Buffer): void;
   pragma(sql: string): unknown;
 };
 
@@ -49,6 +50,11 @@ export class EncryptedDatabase {
       this.db.close();
       this.db = null;
     }
+  }
+
+  rekey(rawKey: Buffer): void {
+    if (rawKey.length !== 32) throw new Error("database raw key must be 32 bytes");
+    this.open().rekey(rawKey);
   }
 
   /** Purge definitivo (ADR-004): secure_delete + vacuum após remoções. */

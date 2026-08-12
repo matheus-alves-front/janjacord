@@ -17,6 +17,7 @@ export const PERMISSIONS = [
   "manage_channels",
   "manage_roles",
   "manage_invites",
+  "manage_hosts",
   // members
   "kick_members",
   "ban_members",

@@ -8,6 +8,8 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fork } from "node:child_process";
+import { createHmac } from "node:crypto";
+import { ed25519PublicKey } from "@janjacord/crypto";
 import { createIdentity } from "@janjacord/identity";
 import { HostClient } from "@janjacord/networking";
 import nodeDataChannel from "node-datachannel";
@@ -39,8 +41,12 @@ function waitFor(ws, event, t = 8000) {
   });
 }
 
-async function connect(identityId, url) {
-  const client = new HostClient(url, { identityId });
+async function connect(identity, hostPublicKey, url) {
+  const client = new HostClient(url, {
+    identityId: identity.identityId,
+    deviceSeed: identity.seed,
+    expectedHostPublicKey: hostPublicKey,
+  });
   await new Promise((res) => {
     client.onOpen(() => res());
     setTimeout(res, 5000);
@@ -50,7 +56,7 @@ async function connect(identityId, url) {
     client.onEventOnce("result", (f) => res(f.data));
     setTimeout(() => res(null), 8000);
   });
-  client.send("hello", { identityId });
+  client.send("hello", { identityId: identity.identityId });
   const hello = await helloPromise;
   if (hello?.ok) return { client, state: hello }; // envelope {ok, data}
   return { client, state: null };
@@ -60,10 +66,14 @@ async function main() {
   const dir = mkdtempSync(join(tmpdir(), "jc-call-"));
   let host = null;
   try {
-    const aliceId = "alice-call";
-    const bobId = "bob-call";
     const alice = await createIdentity("alice", "senha-alice-123", join(dir, "a-vault.json"));
     const bob = await createIdentity("bob", "senha-bob-456", join(dir, "b-vault.json"));
+    const carol = await createIdentity("carol", "senha-carol-789", join(dir, "c-vault.json"));
+    const aliceId = alice.identityId;
+    const bobId = bob.identityId;
+    const authoritySeed = createHmac("sha256", alice.seed).update("smoke-call-authority").digest();
+    const hostSeed = createHmac("sha256", alice.seed).update("smoke-call-host").digest();
+    const hostPublicKey = ed25519PublicKey(hostSeed).toString("base64url");
 
     host = fork(JANJANODE_MAIN, [], {
       env: {
@@ -72,6 +82,9 @@ async function main() {
         JC_DB_PATH: join(dir, "server.db"),
         JC_OWNER_IDENTITY: aliceId,
         JC_OWNER_NICKNAME: "alice",
+        JC_OWNER_PUBLIC_KEY: ed25519PublicKey(alice.seed).toString("base64url"),
+        JC_AUTHORITY_SIGNING_SEED: authoritySeed.toString("hex"),
+        JC_HOST_SIGNING_SEED: hostSeed.toString("hex"),
         JC_SERVER_NAME: "CallTest",
         JC_PORT: String(HOST_PORT),
       },
@@ -82,7 +95,7 @@ async function main() {
     host.stderr?.on("data", (d) => process.stderr.write(d));
     await new Promise((r) => setTimeout(r, 2000));
 
-    const a = await connect(aliceId, `ws://127.0.0.1:${HOST_PORT}/signal`);
+    const a = await connect(alice, hostPublicKey, `ws://127.0.0.1:${HOST_PORT}/signal`);
     assert(a.state?.ok, "alice conecta");
     // cria canal de call
     const chRes = await a.client.request({ type: "channel.create", channelType: "call", name: "geral-call" });
@@ -91,7 +104,7 @@ async function main() {
 
     // bob entra por invite
     const inv = await a.client.request({ type: "invite.create", initialRoleId: "role-member", maxUses: 1 });
-    const b = await connect(bobId, `ws://127.0.0.1:${HOST_PORT}/signal`);
+    const b = await connect(bob, hostPublicKey, `ws://127.0.0.1:${HOST_PORT}/signal`);
     const joinRes = await b.client.request({ type: "server.join", inviteKey: inv.data.inviteKey });
     assert(joinRes.ok, "bob entra no server");
 
@@ -117,13 +130,13 @@ async function main() {
       a.client.send("command", { type: "call.signal", channelId: callCh.id, to: bobId, payload: { type: type.toLowerCase(), sdp } });
     });
     pcA.onLocalCandidate((candidate, mid) => {
-      a.client.send("command", { type: "call.signal", channelId: callCh.id, to: bobId, payload: { type: "candidate", candidate: JSON.stringify({ candidate, mid }) } });
+      a.client.send("command", { type: "call.signal", channelId: callCh.id, to: bobId, payload: { type: "candidate", candidate: JSON.stringify({ candidate, sdpMid: mid }) } });
     });
     pcB.onLocalDescription((sdp, type) => {
       b.client.send("command", { type: "call.signal", channelId: callCh.id, to: aliceId, payload: { type: type.toLowerCase(), sdp } });
     });
     pcB.onLocalCandidate((candidate, mid) => {
-      b.client.send("command", { type: "call.signal", channelId: callCh.id, to: aliceId, payload: { type: "candidate", candidate: JSON.stringify({ candidate, mid }) } });
+      b.client.send("command", { type: "call.signal", channelId: callCh.id, to: aliceId, payload: { type: "candidate", candidate: JSON.stringify({ candidate, sdpMid: mid }) } });
     });
 
     // logs de signaling
@@ -154,7 +167,7 @@ async function main() {
       if (p.type === "offer") pcB.setRemoteDescription(p.sdp, "Offer");
       if (p.type === "candidate") {
         const c = JSON.parse(p.candidate);
-        pcB.addRemoteCandidate(c.candidate, c.mid);
+        pcB.addRemoteCandidate(c.candidate, c.sdpMid);
       }
     });
     a.client.onEvent(async (evt) => {
@@ -163,7 +176,7 @@ async function main() {
       if (p.type === "answer") pcA.setRemoteDescription(p.sdp, "Answer");
       if (p.type === "candidate") {
         const c = JSON.parse(p.candidate);
-        pcA.addRemoteCandidate(c.candidate, c.mid);
+        pcA.addRemoteCandidate(c.candidate, c.sdpMid);
       }
     });
 
@@ -180,14 +193,14 @@ async function main() {
 
     // limite de participantes (guardrail)
     const inv2 = await a.client.request({ type: "invite.create", initialRoleId: "role-member", maxUses: 1 });
-    const carol = await connect("carol-call", `ws://127.0.0.1:${HOST_PORT}/signal`);
-    await carol.client.request({ type: "server.join", inviteKey: inv2.data.inviteKey });
-    const joinC = await carol.client.request({ type: "call.join", channelId: callCh.id });
+    const carolClient = await connect(carol, hostPublicKey, `ws://127.0.0.1:${HOST_PORT}/signal`);
+    await carolClient.client.request({ type: "server.join", inviteKey: inv2.data.inviteKey });
+    const joinC = await carolClient.client.request({ type: "call.join", channelId: callCh.id });
     assert(joinC.ok, "carol entra na call");
 
     // member sem join_call (role member tem join_call default — ok); testa canal text como call
     const textCh = a.state.data.channels.find((c) => c.type === "text");
-    const badJoin = await carol.client.request({ type: "call.join", channelId: textCh.id });
+    const badJoin = await carolClient.client.request({ type: "call.join", channelId: textCh.id });
     assert(!badJoin.ok && badJoin.error.code === "not_found", "join em canal de texto rejeitado (not_found)");
 
     if (failures === 0) console.log("[smoke-call] MESH + SIGNALING OK");

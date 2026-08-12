@@ -1,4 +1,15 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  createPrivateKey,
+  createPublicKey,
+  randomBytes,
+  sign,
+  timingSafeEqual,
+  verify,
+} from "node:crypto";
 import { argon2id } from "@noble/hashes/argon2.js";
 
 /**
@@ -56,6 +67,140 @@ export function sha256Hex(data: Buffer | string): string {
 
 export function randomBytes32(): Buffer {
   return randomBytes(32);
+}
+
+const ED25519_PKCS8_SEED_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
+const ED25519_SPKI_PUBLIC_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+
+function ed25519PrivateKey(seed: Buffer) {
+  if (seed.length !== 32) throw new Error("Ed25519 seed must be 32 bytes");
+  return createPrivateKey({
+    key: Buffer.concat([ED25519_PKCS8_SEED_PREFIX, seed]),
+    format: "der",
+    type: "pkcs8",
+  });
+}
+
+function ed25519PublicKeyObject(publicKey: Buffer) {
+  if (publicKey.length !== 32) throw new Error("Ed25519 public key must be 32 bytes");
+  return createPublicKey({
+    key: Buffer.concat([ED25519_SPKI_PUBLIC_PREFIX, publicKey]),
+    format: "der",
+    type: "spki",
+  });
+}
+
+/** Deterministic Ed25519 public key derived from a persisted 32-byte seed. */
+export function ed25519PublicKey(seed: Buffer): Buffer {
+  const spki = createPublicKey(ed25519PrivateKey(seed)).export({ format: "der", type: "spki" });
+  return Buffer.from(spki).subarray(-32);
+}
+
+export function ed25519Fingerprint(publicKey: Buffer): string {
+  if (publicKey.length !== 32) throw new Error("Ed25519 public key must be 32 bytes");
+  return sha256Hex(publicKey);
+}
+
+function canonicalize(value: unknown): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("canonical JSON rejects non-finite numbers");
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (typeof value === "object") {
+    const out = Object.create(null) as Record<string, unknown>;
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      const item = (value as Record<string, unknown>)[key];
+      if (item === undefined) throw new Error("canonical JSON rejects undefined values");
+      out[key] = canonicalize(item);
+    }
+    return out;
+  }
+  throw new Error(`canonical JSON rejects ${typeof value}`);
+}
+
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(canonicalize(value));
+}
+
+export interface AuthenticatedStoreEnvelope<T> {
+  version: 1;
+  counter: number;
+  payload: T;
+  mac: string;
+}
+
+export interface AuthenticatedCounterAnchor {
+  version: 1;
+  counter: number;
+  storeMac: string;
+  mac: string;
+}
+
+function hmacHex(key: Buffer, domain: string, value: unknown): string {
+  if (key.length < 32) throw new Error("authenticated store key must be at least 32 bytes");
+  return createHmac("sha256", key).update(`${domain}\0${canonicalJson(value)}`, "utf8").digest("hex");
+}
+
+function equalHex(left: unknown, right: string): boolean {
+  if (typeof left !== "string" || !/^[0-9a-f]{64}$/.test(left)) return false;
+  return timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
+}
+
+export function createAuthenticatedStoreEnvelope<T>(key: Buffer, counter: number, payload: T): AuthenticatedStoreEnvelope<T> {
+  if (!Number.isSafeInteger(counter) || counter < 1) throw new Error("authenticated store counter must be positive");
+  const body = { version: 1 as const, counter, payload };
+  return { ...body, mac: hmacHex(key, "janjacord.local-store.v1", body) };
+}
+
+export function verifyAuthenticatedStoreEnvelope<T>(key: Buffer, value: unknown): AuthenticatedStoreEnvelope<T> | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<AuthenticatedStoreEnvelope<T>>;
+  if (candidate.version !== 1 || !Number.isSafeInteger(candidate.counter) || Number(candidate.counter) < 1
+    || !("payload" in candidate)) return null;
+  const body = { version: 1 as const, counter: Number(candidate.counter), payload: candidate.payload as T };
+  const expected = hmacHex(key, "janjacord.local-store.v1", body);
+  return equalHex(candidate.mac, expected) ? { ...body, mac: candidate.mac as string } : null;
+}
+
+export function createAuthenticatedCounterAnchor(key: Buffer, counter: number, storeMac: string): AuthenticatedCounterAnchor {
+  if (!Number.isSafeInteger(counter) || counter < 1 || !/^[0-9a-f]{64}$/.test(storeMac)) {
+    throw new Error("invalid authenticated counter anchor");
+  }
+  const body = { version: 1 as const, counter, storeMac };
+  return { ...body, mac: hmacHex(key, "janjacord.local-store-anchor.v1", body) };
+}
+
+export function verifyAuthenticatedCounterAnchor(key: Buffer, value: unknown, counter: number, storeMac: string): boolean {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<AuthenticatedCounterAnchor>;
+  if (candidate.version !== 1 || candidate.counter !== counter || candidate.storeMac !== storeMac) return false;
+  const body = { version: 1 as const, counter, storeMac };
+  return equalHex(candidate.mac, hmacHex(key, "janjacord.local-store-anchor.v1", body));
+}
+
+function signatureMessage(domain: string, payload: unknown): Buffer {
+  if (!/^[a-z0-9._-]{1,64}$/.test(domain)) throw new Error("invalid signature domain");
+  return Buffer.from(`${domain}\0${canonicalJson(payload)}`, "utf8");
+}
+
+export function signCanonicalPayload(seed: Buffer, domain: string, payload: unknown): Buffer {
+  return sign(null, signatureMessage(domain, payload), ed25519PrivateKey(seed));
+}
+
+export function verifyCanonicalPayload(
+  publicKey: Buffer,
+  domain: string,
+  payload: unknown,
+  signature: Buffer,
+): boolean {
+  if (signature.length !== 64) return false;
+  try {
+    return verify(null, signatureMessage(domain, payload), ed25519PublicKeyObject(publicKey), signature);
+  } catch {
+    return false;
+  }
 }
 
 /** Asset key 32B por arquivo (ADR-012); a key viaja dentro do ciphertext MLS. */

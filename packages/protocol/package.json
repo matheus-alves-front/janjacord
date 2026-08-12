@@ -17,6 +17,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@janjacord/crypto": "workspace:*",
     "@janjacord/schemas": "workspace:*"
   },
   "devDependencies": {

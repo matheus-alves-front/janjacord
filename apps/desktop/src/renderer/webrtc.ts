@@ -1,3 +1,9 @@
+import {
+  CallIceCandidateSchema,
+  CallSignalPayloadSchema,
+  type CallSignalPayload,
+} from "@janjacord/schemas";
+
 /**
  * MeshCall — WebRTC mesh P2P (ADR-006) no renderer (Chromium nativo).
  * Signaling via host (relé SDP/candidates; conteúdo E2EE por DTLS).
@@ -5,7 +11,7 @@
  */
 export interface CallSignal {
   from: string;
-  payload: { type: "offer" | "answer" | "candidate"; sdp?: string; candidate?: string };
+  payload: CallSignalPayload;
 }
 
 export interface MeshCallOptions {
@@ -19,7 +25,7 @@ export interface MeshCallOptions {
   onPeerLeft: (peerId: string) => void;
 }
 
-const DEFAULT_ICE: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+const DEFAULT_ICE: RTCIceServer[] = [];
 
 export class MeshCall {
   private peers = new Map<string, RTCPeerConnection>();
@@ -38,7 +44,13 @@ export class MeshCall {
       iceTransportPolicy: relayOnly ? "relay" : "all", // ADR-007: relay-only não emite host/srflx
     });
     pc.onicecandidate = (e) => {
-      if (e.candidate) this.opts.sendSignal(this.currentPeer(pc)!, { type: "candidate", candidate: JSON.stringify(e.candidate) });
+      if (!e.candidate) return;
+      const peerId = this.currentPeer(pc);
+      const payload = CallSignalPayloadSchema.safeParse({
+        type: "candidate",
+        candidate: JSON.stringify(e.candidate),
+      });
+      if (peerId && payload.success) this.opts.sendSignal(peerId, payload.data);
     };
     pc.ontrack = (e) => {
       const peerId = this.currentPeer(pc);
@@ -77,12 +89,16 @@ export class MeshCall {
     for (const track of this.localStream?.getTracks() ?? []) pc.addTrack(track, this.localStream!);
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    this.opts.sendSignal(peerId, { type: "offer", sdp: offer.sdp });
+    this.opts.sendSignal(peerId, CallSignalPayloadSchema.parse({ type: "offer", sdp: offer.sdp }));
   }
 
   /** Processa signaling recebido do peer (offer/answer/candidate). */
   async handleSignal(signal: CallSignal): Promise<void> {
-    const { from, payload } = signal;
+    if (!signal || typeof signal.from !== "string" || signal.from.length === 0) return;
+    const parsedPayload = CallSignalPayloadSchema.safeParse(signal.payload);
+    if (!parsedPayload.success) return;
+    const { from } = signal;
+    const payload = parsedPayload.data;
     if (payload.type === "offer") {
       let pc = this.peers.get(from);
       if (!pc) {
@@ -91,24 +107,49 @@ export class MeshCall {
         this.peerIds.set(pc, from);
         for (const track of this.localStream?.getTracks() ?? []) pc.addTrack(track, this.localStream!);
       }
-      await pc.setRemoteDescription({ type: "offer", sdp: payload.sdp });
+      if (!await this.setValidatedRemoteDescription(pc, payload, "offer")) return;
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      this.opts.sendSignal(from, { type: "answer", sdp: answer.sdp });
+      this.opts.sendSignal(from, CallSignalPayloadSchema.parse({ type: "answer", sdp: answer.sdp }));
     } else if (payload.type === "answer") {
       const pc = this.peers.get(from);
       if (pc && pc.signalingState !== "stable") {
-        await pc.setRemoteDescription({ type: "answer", sdp: payload.sdp });
+        await this.setValidatedRemoteDescription(pc, payload, "answer");
       }
     } else if (payload.type === "candidate") {
       const pc = this.peers.get(from);
       if (pc) {
-        try {
-          await pc.addIceCandidate(JSON.parse(payload.candidate!));
-        } catch {
-          // candidato obsoleto — ignora
-        }
+        await this.addValidatedIceCandidate(pc, payload);
       }
+    }
+  }
+
+  private async setValidatedRemoteDescription(
+    pc: RTCPeerConnection,
+    payload: unknown,
+    expectedType: "offer" | "answer",
+  ): Promise<boolean> {
+    const parsed = CallSignalPayloadSchema.safeParse(payload);
+    if (!parsed.success || parsed.data.type !== expectedType) return false;
+    await pc.setRemoteDescription({ type: expectedType, sdp: parsed.data.sdp });
+    return true;
+  }
+
+  private async addValidatedIceCandidate(pc: RTCPeerConnection, payload: unknown): Promise<void> {
+    const parsedPayload = CallSignalPayloadSchema.safeParse(payload);
+    if (!parsedPayload.success || parsedPayload.data.type !== "candidate") return;
+    let candidate: unknown;
+    try {
+      candidate = JSON.parse(parsedPayload.data.candidate);
+    } catch {
+      return;
+    }
+    const parsedCandidate = CallIceCandidateSchema.safeParse(candidate);
+    if (!parsedCandidate.success) return;
+    try {
+      await pc.addIceCandidate(parsedCandidate.data);
+    } catch {
+      // candidato obsoleto — ignora
     }
   }
 

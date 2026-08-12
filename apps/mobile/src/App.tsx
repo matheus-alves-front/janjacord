@@ -84,7 +84,7 @@ export default function App() {
       const client = new HostClientRN();
       const hello = await client.connect(endpoint, id.identityId);
       if (!(hello as { ok?: boolean })?.ok) throw new Error("host não respondeu o hello");
-      const join = await client.request({ type: "server.join", inviteKey: inviteKey.trim() });
+      const join = await client.request({ type: "server.join", inviteKey: inviteKey.trim(), nickname: id.nickname });
       if (!(join as { ok?: boolean })?.ok) throw new Error((join as { error?: { message?: string } }).error?.message ?? "join falhou");
       const state = (join as { data: any }).data;
       const general = state.channels.find((c: any) => c.type === "text");

@@ -9,8 +9,13 @@ import {
   buildEnvelope,
   encodeFragment,
   decodeFragment,
+  attachmentChunkCount,
+  attachmentSha256,
+  decodeAttachmentChunk,
+  encodeAttachmentChunks,
+  expectedAttachmentChunkBytes,
 } from "../src/index.js";
-import { PROTOCOL_VERSION } from "@janjacord/schemas";
+import { ATTACHMENT_CHUNK_BYTES, PROTOCOL_VERSION } from "@janjacord/schemas";
 
 const base = {
   serverId: "11111111-1111-4111-8111-111111111111",
@@ -70,6 +75,30 @@ describe("anti-replay", () => {
     guard.check("m1");
     now = 2000;
     expect(guard.check("m1")).toBe(true);
+  });
+});
+
+describe("attachment chunk transport", () => {
+  it("roundtrips a multi-chunk ciphertext with exact aggregate bounds", () => {
+    const ciphertext = Buffer.alloc(ATTACHMENT_CHUNK_BYTES * 2 + 17, 11);
+    const chunks = encodeAttachmentChunks(ciphertext);
+    expect(chunks).toHaveLength(attachmentChunkCount(ciphertext.length));
+    const decoded = chunks.map((chunk, index) => {
+      expect(chunk.sizeBytes).toBe(expectedAttachmentChunkBytes(ciphertext.length, chunks.length, index));
+      return decodeAttachmentChunk(chunk.data, chunk.sizeBytes, chunk.hash);
+    });
+    expect(Buffer.concat(decoded, ciphertext.length)).toEqual(ciphertext);
+    expect(attachmentSha256(Buffer.concat(decoded))).toBe(attachmentSha256(ciphertext));
+  });
+
+  it("rejects encoded overflow, non-canonical base64, size lies and hash corruption before acceptance", () => {
+    const bytes = Buffer.alloc(64, 3);
+    const encoded = bytes.toString("base64");
+    expect(() => decodeAttachmentChunk(`${"A".repeat(ATTACHMENT_CHUNK_BYTES / 3 * 4)}AAAA`, ATTACHMENT_CHUNK_BYTES))
+      .toThrow(/encoded length/);
+    expect(() => decodeAttachmentChunk("AB==", 1)).toThrow(/canonical/);
+    expect(() => decodeAttachmentChunk(encoded, 63)).toThrow(/declared size/);
+    expect(() => decodeAttachmentChunk(encoded, 64, "0".repeat(64))).toThrow(/hash mismatch/);
   });
 });
 

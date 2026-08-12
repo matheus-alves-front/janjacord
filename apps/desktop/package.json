@@ -1,6 +1,17 @@
 {
   "name": "@janjacord/desktop",
   "version": "0.1.0",
+  "description": "Desktop self-hosted para comunidades JanjaCord",
+  "author": {
+    "name": "JanjaCord contributors",
+    "email": "matheus-alves-front@users.noreply.github.com"
+  },
+  "homepage": "https://github.com/matheus-alves-front/janjacord",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/matheus-alves-front/janjacord.git"
+  },
+  "desktopName": "JanjaCord",
   "private": true,
   "type": "module",
   "main": "electron/main.mjs",
@@ -8,19 +19,33 @@
     "build": "vite build",
     "dev": "vite",
     "start": "electron .",
-    "test": "echo 'desktop smoke via start'",
+    "test": "vitest run && tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "dist": "vite build && electron-builder",
+    "smoke:phase8:build": "pnpm --filter @janjacord/schemas build && pnpm --filter @janjacord/crypto build && pnpm --filter @janjacord/protocol build && pnpm --filter @janjacord/networking build && pnpm --filter @janjacord/rendezvous build && pnpm --filter @janjacord/janjanode build",
+    "smoke:connectivity": "pnpm run smoke:phase8:build && node scripts/smoke-ice-host.mjs && node scripts/smoke-ice-failover.mjs && node scripts/smoke-ice-turn.mjs && node scripts/smoke-multi-bridge.mjs",
+    "smoke:replication": "pnpm run smoke:phase8:build && node scripts/smoke-replica-security.mjs && node scripts/smoke-replica.mjs && node scripts/smoke-lease.mjs",
+    "smoke:operator-ipc": "pnpm build && node scripts/smoke-operator-ipc.mjs",
+    "validate:release-config": "node scripts/validate-desktop-artifacts.mjs --platform config",
+    "validate:linux-artifacts": "node scripts/validate-desktop-artifacts.mjs --platform linux --release-dir release",
+    "validate:windows-artifacts:unsigned": "node scripts/validate-desktop-artifacts.mjs --platform windows --release-dir release --windows-signature unsigned",
+    "validate:windows-artifacts:signed": "node scripts/validate-desktop-artifacts.mjs --platform windows --release-dir release --windows-signature valid",
+    "cleanup:linux-autostart": "sh scripts/janjacord-cleanup-autostart",
+    "dist": "node scripts/package-explicit.mjs",
+    "dist:win:test": "node scripts/package-windows.mjs --unsigned-test",
+    "dist:win:release": "node scripts/package-windows.mjs --signed-release",
+    "dist:linux": "node scripts/package-linux.mjs",
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
     "@janjacord/crypto": "workspace:*",
     "@janjacord/crypto-core": "workspace:*",
     "@janjacord/identity": "workspace:*",
+    "@janjacord/janjanode": "workspace:*",
     "@janjacord/networking": "workspace:*",
     "@janjacord/persistence": "workspace:*",
     "@janjacord/protocol": "workspace:*",
     "@janjacord/schemas": "workspace:*",
+    "lucide-react": "^0.468.0",
     "node-datachannel": "^0.32.3",
     "qrcode": "^1.5.4",
     "react": "^19.0.0",
@@ -40,28 +65,53 @@
     "electron-updater": "^6.8.9",
     "tailwindcss": "^4.1.0",
     "typescript": "^5.8.0",
+    "vitest": "^3.0.0",
     "vite": "^7.0.0"
   },
   "build": {
     "appId": "br.janjacord.app",
     "productName": "JanjaCord",
+    "executableName": "janjacord",
+    "asar": true,
+    "artifactName": "JanjaCord-${version}-${arch}.${ext}",
     "directories": {
       "output": "release"
     },
+    "icon": "build/icon.png",
+    "extraResources": [
+      {
+        "from": "scripts/janjacord-cleanup-autostart",
+        "to": "janjacord-cleanup-autostart"
+      }
+    ],
     "files": [
       "dist/**",
       "electron/**",
-      "package.json"
+      "!electron/**/*.test.*",
+      "package.json",
+      "!node_modules/@janjacord/*/.turbo/**",
+      "!node_modules/@janjacord/*/target/**",
+      "!node_modules/@janjacord/*/src/**",
+      "!node_modules/@janjacord/*/scripts/**",
+      "!node_modules/@janjacord/*/Cargo.*",
+      "!node_modules/@janjacord/*/tsconfig*.json",
+      "!node_modules/@janjacord/**/*.test.*",
+      "!node_modules/@janjacord/**/*.map",
+      "!node_modules/**/*.test.*",
+      "!node_modules/**/test/**",
+      "!node_modules/**/tests/**",
+      "!node_modules/**/__tests__/**",
+      "!node_modules/**/*.map"
     ],
-    "publish": {
-      "provider": "generic",
-      "url": "https://updates.janjacord.example.com/janjacord",
-      "channel": "latest"
-    },
     "win": {
       "target": [
         "nsis"
       ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowElevation": true
     },
     "mac": {
       "target": [
@@ -75,7 +125,8 @@
         "AppImage",
         "deb"
       ],
-      "category": "Network"
+      "category": "Network",
+      "syncDesktopName": true
     }
   }
 }

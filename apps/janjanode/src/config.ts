@@ -1,13 +1,13 @@
 /**
- * Configuração do JanjaNode (host do server).
- * O host recebe a dbKey do dono (vault local) — nunca plaintext adicional (ADR-002/016).
+ * Configuração do JanjaNode (host do server). JC_DB_KEY is a random server-hosting key kept in
+ * the encrypted Community Host profile; it is deliberately distinct from identity/MLS storage.
  */
 export interface JanjaNodeConfig {
   /** Porta do signaling WebSocket. */
   port: number;
   /** Caminho do banco SQLCipher do server. */
   dbPath: string;
-  /** Raw key 32B do SQLCipher (dbKey do vault do dono). */
+  /** Raw per-server 32B SQLCipher key from the encrypted Community Host profile. */
   dbKey: Buffer;
   /** Identidade do Owner/Primary Host (autoridade inicial). */
   ownerIdentity: string;

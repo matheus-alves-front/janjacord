@@ -1,0 +1,205 @@
+name: ${COMPOSE_PROJECT_NAME:-janjabridge}
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  init: true
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  rendezvous:
+    <<: *service-defaults
+    image: ${JANJABRIDGE_IMAGE:-janjacord/rendezvous:local}
+    user: "${JANJABRIDGE_UID:-1000}:${JANJABRIDGE_GID:-1000}"
+    build:
+      context: ../..
+      dockerfile: infra/docker/rendezvous.Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:24.17.0-alpine3.23}
+    environment:
+      NODE_ENV: production
+      JC_RENDEZVOUS_PORT: "8920"
+      JC_RENDEZVOUS_MAX_TTL_MS: ${JC_RENDEZVOUS_MAX_TTL_MS:-300000}
+      JC_RENDEZVOUS_RATE_LIMIT: ${JC_RENDEZVOUS_RATE_LIMIT:-120}
+      JC_TRUSTED_PROXY_IPS: ${JC_TRUSTED_PROXY_IPS:-172.30.0.10}
+      # The rendezvous issuer uses this hostname only in ICE URLs. WSS endpoints come
+      # from the signed descriptor and remain on BRIDGE_DOMAIN.
+      JC_BRIDGE_DOMAIN: ${TURN_DOMAIN:?Run ./scripts/init.sh first}
+      JC_TURN_REALM: ${TURN_REALM:?Run ./scripts/init.sh first}
+      JC_TURN_PORT: ${TURN_PORT:-3478}
+      JC_TURN_TLS_PORT: ${TURN_TLS_PORT:-443}
+      JC_TURN_SHARED_SECRET_FILE: /run/secrets/turn_shared_secret
+      JC_BRIDGE_PAIRING_ADMIN_KEY_FILE: /run/secrets/bridge_pairing_admin_key
+      JC_BRIDGE_SIGNING_KEY_FILE: /run/secrets/bridge_signing_key
+      JC_BRIDGE_DESCRIPTOR_FILE: /etc/janjabridge/bridge-descriptor.json
+      JC_RENDEZVOUS_STATE_FILE: /var/lib/janjabridge/control-state.jsonl
+    secrets:
+      - turn_shared_secret
+      - bridge_pairing_admin_key
+      - bridge_signing_key
+    expose:
+      - "8920"
+    networks:
+      control:
+        ipv4_address: 172.30.0.11
+    read_only: true
+    volumes:
+      - ./state/rendezvous:/var/lib/janjabridge:Z
+      - ./state/bridge-descriptor.json:/etc/janjabridge/bridge-descriptor.json:ro,Z
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: ${RENDEZVOUS_MEMORY:-256m}
+    cpus: ${RENDEZVOUS_CPUS:-1.0}
+    healthcheck:
+      test: ["CMD", "node", "/opt/janjabridge/app/healthcheck.mjs"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  gateway:
+    <<: *service-defaults
+    image: ${NGINX_IMAGE:-nginx:1.28.3-alpine}
+    entrypoint: ["/bin/sh", "/opt/janjabridge/gateway-entrypoint.sh"]
+    environment:
+      BRIDGE_DOMAIN: ${BRIDGE_DOMAIN:?Run ./scripts/init.sh first}
+      TURN_DOMAIN: ${TURN_DOMAIN:?Run ./scripts/init.sh first}
+      TURN_TLS_INTERNAL_PORT: ${TURN_TLS_INTERNAL_PORT:-5349}
+      NGINX_ENTRYPOINT_QUIET_LOGS: "1"
+    depends_on:
+      rendezvous:
+        condition: service_healthy
+      coturn:
+        condition: service_healthy
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+    volumes:
+      - ./config/nginx.conf.template:/opt/janjabridge/nginx.conf.template:ro,Z
+      - ./scripts/gateway-entrypoint.sh:/opt/janjabridge/gateway-entrypoint.sh:ro,Z
+      - ./scripts/gateway-healthcheck.sh:/opt/janjabridge/gateway-healthcheck.sh:ro,Z
+      - ./state/letsencrypt:/etc/letsencrypt:ro,z
+      - ./state/bootstrap-tls:/bootstrap-tls:ro,z
+      - ./state/acme-webroot:/var/www/certbot:ro,z
+    networks:
+      control:
+        ipv4_address: 172.30.0.10
+      public: {}
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+      - /var/cache/nginx:size=32m,uid=101,gid=101
+      - /var/run:size=1m,uid=101,gid=101
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_READ_SEARCH
+      - NET_BIND_SERVICE
+      - SETGID
+      - SETUID
+    pids_limit: 128
+    mem_limit: ${GATEWAY_MEMORY:-128m}
+    cpus: ${GATEWAY_CPUS:-0.5}
+    healthcheck:
+      test: ["CMD", "/bin/sh", "/opt/janjabridge/gateway-healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  coturn:
+    <<: *service-defaults
+    image: ${COTURN_IMAGE:-coturn/coturn:4.15.0-r0}
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/opt/janjabridge/coturn-entrypoint.sh"]
+    environment:
+      BRIDGE_DOMAIN: ${BRIDGE_DOMAIN:?Run ./scripts/init.sh first}
+      TURN_DOMAIN: ${TURN_DOMAIN:?Run ./scripts/init.sh first}
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:?Run ./scripts/init.sh first}
+      TURN_REALM: ${TURN_REALM:?Run ./scripts/init.sh first}
+      TURN_PORT: ${TURN_PORT:-3478}
+      TURN_TLS_PORT: ${TURN_TLS_INTERNAL_PORT:-5349}
+      TURN_MIN_PORT: ${TURN_MIN_PORT:-49160}
+      TURN_MAX_PORT: ${TURN_MAX_PORT:-49259}
+      TURN_USER_QUOTA: ${TURN_USER_QUOTA:-4}
+      TURN_TOTAL_QUOTA: ${TURN_TOTAL_QUOTA:-100}
+      TURN_MAX_BPS: ${TURN_MAX_BPS:-4000000}
+      TURN_BPS_CAPACITY: ${TURN_BPS_CAPACITY:-50000000}
+      TURN_SHARED_SECRET_FILE: /run/secrets/turn_shared_secret
+    secrets:
+      - turn_shared_secret
+    ports:
+      - "${TURN_PORT:-3478}:${TURN_PORT:-3478}/udp"
+      - "${TURN_PORT:-3478}:${TURN_PORT:-3478}/tcp"
+      - "${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49259}:${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49259}/udp"
+    expose:
+      - "${TURN_TLS_INTERNAL_PORT:-5349}"
+    volumes:
+      - ./scripts/coturn-entrypoint.sh:/opt/janjabridge/coturn-entrypoint.sh:ro,Z
+      - ./scripts/coturn-healthcheck.sh:/opt/janjabridge/coturn-healthcheck.sh:ro,Z
+      - ./state/letsencrypt:/etc/letsencrypt:ro,z
+      - ./state/bootstrap-tls:/bootstrap-tls:ro,z
+    networks:
+      - public
+    read_only: true
+    tmpfs:
+      - /run/coturn:size=1m,mode=0700
+      - /tmp:size=8m,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_READ_SEARCH
+      - NET_BIND_SERVICE
+      - SETGID
+      - SETUID
+    pids_limit: 256
+    mem_limit: ${COTURN_MEMORY:-512m}
+    cpus: ${COTURN_CPUS:-2.0}
+    healthcheck:
+      test: ["CMD", "/bin/sh", "/opt/janjabridge/coturn-healthcheck.sh"]
+      interval: 20s
+      timeout: 7s
+      retries: 5
+      start_period: 15s
+
+  certbot:
+    image: ${CERTBOT_IMAGE:-certbot/certbot:v5.7.0}
+    profiles: ["maintenance"]
+    entrypoint: ["certbot"]
+    volumes:
+      - ./state/letsencrypt:/etc/letsencrypt:z
+      - ./state/acme-webroot:/var/www/certbot:z
+    networks:
+      - public
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+    restart: "no"
+
+networks:
+  control:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+  public: {}
+
+secrets:
+  turn_shared_secret:
+    file: ./secrets/turn-shared-secret
+  bridge_pairing_admin_key:
+    file: ./secrets/bridge-pairing-admin-key
+  bridge_signing_key:
+    file: ./secrets/bridge-signing-key.pem

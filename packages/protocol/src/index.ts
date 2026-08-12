@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   MessageEnvelopeSchema,
   type MessageEnvelope,
@@ -6,6 +6,9 @@ import {
   MAX_FRAME_BYTES,
   type AttachmentRef,
 } from "@janjacord/schemas";
+
+export * from "./connectivity.js";
+export * from "./attachments.js";
 
 /**
  * Wire protocol v0 (ADR-013): envelope versionado, fragmentação, anti-replay.
@@ -129,10 +132,16 @@ export function buildEnvelope(input: {
   ordering: MessageEnvelope["ordering"];
   expiresAt?: number;
 }): MessageEnvelope {
+  const members = [...new Set(input.audience.members)].sort();
   return MessageEnvelopeSchema.parse({
     protocolVersion: PROTOCOL_VERSION,
     messageId: newMessageId(),
     createdAt: Date.now(),
     ...input,
+    audience: {
+      algo: "sha256",
+      members,
+      commitment: createHash("sha256").update(members.join("\0")).digest("hex"),
+    },
   });
 }

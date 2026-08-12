@@ -5,8 +5,16 @@ node_modules/
 # Build output
 dist/
 build/
+.release-staging-*/
+.source-snapshot-staging-*/
 *.tsbuildinfo
 .turbo/
+
+# Electron application icons are release source inputs, not generated output.
+!apps/desktop/build/
+apps/desktop/build/*
+!apps/desktop/build/icon.png
+!apps/desktop/build/icon.svg
 
 # Rust
 target/

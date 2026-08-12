@@ -23,6 +23,7 @@
     "@nestjs/platform-express": "^11.1.28",
     "@nestjs/platform-ws": "^11.0.0",
     "@nestjs/websockets": "^11.0.0",
+    "node-datachannel": "^0.32.3",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.0",
     "ws": "^8.18.0",
