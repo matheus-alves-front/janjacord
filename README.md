@@ -1,6 +1,19 @@
-# JanjaCord
+<h1 align="center">JanjaCord</h1>
 
-**Server. Channel. Talk. Nothing else.**
+<p align="center">
+  <img
+    width="600"
+    height="600"
+    alt="JanjaCord"
+    src="https://github.com/user-attachments/assets/8570611c-a8b5-41a0-9c94-c4a2cd511b6d"
+  />
+</p>
+
+<p align="center">
+  <strong>Server. Channel. Talk. Nothing else.</strong>
+</p>
+
+<br/>
 
 JanjaCord é um comunicador privado, invite-only e self-hosted para comunidades. A identidade é
 criada localmente, o conteúdo é criptografado de ponta a ponta e cada comunidade pode ser mantida
