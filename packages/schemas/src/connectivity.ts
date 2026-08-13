@@ -2,7 +2,9 @@ import { z } from "zod";
 import { uuidSchema } from "./envelope.js";
 
 export const BRIDGE_DESCRIPTOR_VERSION = 1 as const;
+export const DIRECT_ROUTE_HINT_VERSION = 1 as const;
 export const INVITE_V3_VERSION = 3 as const;
+export const INVITE_V4_VERSION = 4 as const;
 export const HOST_GRANT_VERSION = 1 as const;
 export const HOST_GRANT_REVOCATION_VERSION = 1 as const;
 export const HOST_RECORD_VERSION = 1 as const;
@@ -12,6 +14,7 @@ export const HOST_AUTH_CHALLENGE_VERSION = 1 as const;
 export const BRIDGE_REGISTRATION_PROOF_VERSION = 1 as const;
 
 export const MAX_BRIDGE_HINTS = 3;
+export const MAX_DIRECT_ROUTE_HINTS = 3;
 export const MAX_CONNECTIVITY_ENDPOINTS = 8;
 export const MAX_ICE_CANDIDATES = 32;
 
@@ -39,6 +42,7 @@ const Hex64Schema = z.string().regex(/^[0-9a-f]{64}$/, "expected lowercase sha25
 const timestampSchema = z.number().int().nonnegative();
 const identityIdSchema = z.string().min(1).max(128);
 const hostIdSchema = z.string().min(1).max(128);
+const routeIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/, "invalid route id");
 const endpointSchema = z.string().min(1).max(2048).superRefine((value, ctx) => {
   try {
     const url = new URL(value);
@@ -50,6 +54,68 @@ const endpointSchema = z.string().min(1).max(2048).superRefine((value, ctx) => {
   }
 });
 const iceCandidateSchema = z.string().min(1).max(4096);
+
+export const DirectRouteProviderSchema = z.enum(["tailscale", "ngrok", "cloudflare", "manual"]);
+export type DirectRouteProvider = z.infer<typeof DirectRouteProviderSchema>;
+
+export const DirectWssEndpointSchema = z.string().min(1).max(2048).superRefine((value, ctx) => {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "wss:") {
+      ctx.addIssue({ code: "custom", message: "direct route endpoint must use wss://" });
+    }
+    if (url.username || url.password) {
+      ctx.addIssue({ code: "custom", message: "direct route endpoint must not contain credentials" });
+    }
+    if (url.hash) {
+      ctx.addIssue({ code: "custom", message: "direct route endpoint must not contain a fragment" });
+    }
+  } catch {
+    ctx.addIssue({ code: "custom", message: "invalid direct route endpoint URL" });
+  }
+});
+
+/** Strict local input. JanjaNode derives all identity-bearing fields before signing. */
+export const DirectRouteHintConfigSchema = z.object({
+  provider: DirectRouteProviderSchema,
+  endpoint: DirectWssEndpointSchema,
+  stable: z.boolean(),
+  expiresAt: timestampSchema,
+}).strict();
+
+export type DirectRouteHintConfig = z.infer<typeof DirectRouteHintConfigSchema>;
+
+export const DirectRouteHintsConfigSchema = z.array(DirectRouteHintConfigSchema)
+  .max(MAX_DIRECT_ROUTE_HINTS)
+  .refine((routes) => new Set(routes.map((route) => `${route.provider}\0${route.endpoint}`)).size === routes.length, {
+    message: "direct route provider and endpoint pairs must be unique",
+  });
+
+export const DirectRouteHintPayloadSchema = z.object({
+  version: z.literal(DIRECT_ROUTE_HINT_VERSION),
+  provider: DirectRouteProviderSchema,
+  routeId: routeIdSchema,
+  endpoint: DirectWssEndpointSchema,
+  serverId: uuidSchema,
+  hostId: hostIdSchema,
+  hostPublicKey: PublicKeySchema,
+  stable: z.boolean().optional(),
+  issuedAt: timestampSchema,
+  expiresAt: timestampSchema,
+}).strict().refine(expiresAfterIssue, {
+  path: ["expiresAt"],
+  message: "expiresAt must be greater than issuedAt",
+});
+
+export type DirectRouteHintPayload = z.infer<typeof DirectRouteHintPayloadSchema>;
+
+export const SignedDirectRouteHintSchema = z.object({
+  payload: DirectRouteHintPayloadSchema,
+  publicKey: PublicKeySchema,
+  signature: SignatureSchema,
+}).strict();
+
+export type SignedDirectRouteHint = z.infer<typeof SignedDirectRouteHintSchema>;
 
 function expiresAfterIssue<T extends { issuedAt: number; expiresAt: number }>(value: T): boolean {
   return value.expiresAt > value.issuedAt;
@@ -177,6 +243,48 @@ export const SignedInviteV3Schema = z
   .strict();
 
 export type SignedInviteV3 = z.infer<typeof SignedInviteV3Schema>;
+
+export const InviteV4PayloadSchema = z
+  .object({
+    version: z.literal(INVITE_V4_VERSION),
+    serverId: uuidSchema,
+    authorityFingerprint: AuthorityFingerprintSchema,
+    inviteSecret: z.string().regex(/^[A-Za-z0-9_-]{22}$/, "invite secret must encode exactly 16 bytes"),
+    directRouteHints: z.array(SignedDirectRouteHintSchema).max(MAX_DIRECT_ROUTE_HINTS),
+    bridgeHints: z.array(SignedBridgeDescriptorSchema).max(MAX_BRIDGE_HINTS),
+    issuedAt: timestampSchema,
+    expiresAt: timestampSchema,
+  })
+  .strict()
+  .refine(expiresAfterIssue, {
+    path: ["expiresAt"],
+    message: "expiresAt must be greater than issuedAt",
+  })
+  .refine((invite) => invite.directRouteHints.length + invite.bridgeHints.length > 0, {
+    path: ["directRouteHints"],
+    message: "JC4 must contain at least one connectivity hint",
+  })
+  .refine((invite) => invite.directRouteHints.every((hint) => hint.payload.serverId === invite.serverId), {
+    path: ["directRouteHints"],
+    message: "direct route serverId must match invite serverId",
+  })
+  .refine((invite) => new Set(invite.directRouteHints.map((hint) => hint.payload.routeId)).size === invite.directRouteHints.length, {
+    path: ["directRouteHints"],
+    message: "direct route ids must be unique",
+  });
+
+export type InviteV4Payload = z.infer<typeof InviteV4PayloadSchema>;
+
+export const SignedInviteV4Schema = z.object({
+  payload: InviteV4PayloadSchema,
+  publicKey: PublicKeySchema,
+  signature: SignatureSchema,
+}).strict().refine(
+  (invite) => invite.payload.directRouteHints.every((hint) => hint.publicKey === invite.publicKey),
+  { path: ["payload", "directRouteHints"], message: "direct routes must use the invite authority key" },
+);
+
+export type SignedInviteV4 = z.infer<typeof SignedInviteV4Schema>;
 
 export const HostCapabilitySchema = z.enum(["register", "replicate", "promote"]);
 export type HostCapability = z.infer<typeof HostCapabilitySchema>;

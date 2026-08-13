@@ -13,6 +13,8 @@ import {
   encodeAttachmentChunks,
   hostRegistrationRecordHash,
   parseInviteV3,
+  parseInviteV4,
+  verifySignedDirectRouteHint,
 } from "@janjacord/protocol";
 import { createSignedIceAccessProof } from "@janjacord/networking";
 import { Store } from "./store.js";
@@ -178,6 +180,8 @@ afterEach(() => {
   delete process.env.JC_BRIDGE_DESCRIPTORS;
   delete process.env.JC_RENDEZVOUS_URL;
   delete process.env.JC_PUBLIC_URL;
+  delete process.env.JC_DIRECT_ROUTE_HINTS;
+  delete process.env.JC_ICE_SERVERS;
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -1398,6 +1402,108 @@ describe("ServerService host records", () => {
       );
       expect(joined.ok).toBe(true);
       expect(service.inviteList("invite-reader")).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("derives and authority-signs JC4 direct routes from strict JC_DIRECT_ROUTE_HINTS input", () => {
+    const { service, store } = serviceFixture();
+    try {
+      const now = Date.now();
+      process.env.JC_DIRECT_ROUTE_HINTS = JSON.stringify([{
+        provider: "tailscale",
+        endpoint: "wss://owner.example.test/signal",
+        stable: true,
+        expiresAt: now + 60_000,
+      }]);
+      process.env.JC_BRIDGE_DESCRIPTORS = JSON.stringify(configuredBridgeDescriptors(1));
+      const invite = service.inviteCreate("owner", "role-member", 1);
+      expect(invite.ok).toBe(true);
+      if (!invite.ok) return;
+      const parsed = parseInviteV4(invite.data.inviteKey, now + 1);
+      expect(parsed).not.toBeNull();
+      if (!parsed) return;
+      const hostPublicKey = ed25519PublicKey(Buffer.alloc(32, 12)).toString("base64url");
+      const expectedHostId = `primary-${ed25519Fingerprint(ed25519PublicKey(Buffer.alloc(32, 12))).slice(0, 24)}`;
+      expect(parsed.payload.directRouteHints).toHaveLength(1);
+      expect(parsed.payload.bridgeHints).toHaveLength(1);
+      expect(parsed.payload.directRouteHints[0]?.payload).toMatchObject({
+        provider: "tailscale",
+        endpoint: "wss://owner.example.test/signal",
+        serverId: "11111111-1111-4111-8111-111111111111",
+        hostId: expectedHostId,
+        hostPublicKey,
+        stable: true,
+        issuedAt: expect.any(Number),
+        expiresAt: now + 60_000,
+      });
+      expect(verifySignedDirectRouteHint(parsed.payload.directRouteHints[0], {
+        authorityPublicKey: parsed.publicKey,
+        serverId: parsed.payload.serverId,
+        hostId: expectedHostId,
+        hostPublicKey,
+      }, now + 1)).not.toBeNull();
+      expect(service.joinByInvite(
+        "jc4-member",
+        "JC4 Member",
+        invite.data.inviteKey,
+        ed25519PublicKey(Buffer.alloc(32, 74)).toString("base64url"),
+      ).ok).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("fails closed on malformed direct-route config instead of downgrading the invite", () => {
+    const { service, store } = serviceFixture();
+    try {
+      process.env.JC_DIRECT_ROUTE_HINTS = JSON.stringify([{
+        provider: "manual",
+        endpoint: "ws://owner.example.test/signal",
+        stable: true,
+        expiresAt: Date.now() + 60_000,
+      }]);
+      expect(service.inviteCreate("owner", "role-member", 1))
+        .toMatchObject({ ok: false, error: { code: "invalid_input" } });
+      expect(service.inviteList("owner")).toEqual({ ok: true, data: [] });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("generates JC4 for bridge-only communities while preserving bridge descriptors", () => {
+    const { service, store } = serviceFixture();
+    try {
+      process.env.JC_BRIDGE_DESCRIPTORS = JSON.stringify(configuredBridgeDescriptors(1));
+      const invite = service.inviteCreate("owner", "role-member", 1);
+      expect(invite.ok).toBe(true);
+      if (!invite.ok) return;
+      expect(invite.data.inviteKey.startsWith("JC4-")).toBe(true);
+      expect(parseInviteV3(invite.data.inviteKey)).toBeNull();
+      expect(parseInviteV4(invite.data.inviteKey)?.payload).toMatchObject({
+        directRouteHints: [],
+        bridgeHints: [expect.objectContaining({ payload: expect.objectContaining({ version: 1 }) })],
+      });
+    } finally {
+      store.close();
+    }
+  });
+
+  it("returns direct-only STUN config without a bridge and keeps relay-only fail-closed", () => {
+    const { service, store } = serviceFixture();
+    try {
+      process.env.JC_ICE_SERVERS = JSON.stringify(["stun:stun.example.test:3478"]);
+      expect(service.connectivityIceConfig("owner")).toEqual({
+        ok: true,
+        data: {
+          iceServers: [{ urls: "stun:stun.example.test:3478" }],
+          iceTransportPolicy: "all",
+        },
+      });
+      expect(service.updateConfig("owner", { networkPrivacy: "relay" }).ok).toBe(true);
+      expect(service.connectivityIceConfig("owner"))
+        .toMatchObject({ ok: false, error: { code: "host_offline" } });
     } finally {
       store.close();
     }

@@ -34,6 +34,7 @@ import {
 } from "@janjacord/identity";
 import { createCipheriv, createDecipheriv, createHash, createHmac, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { durableAtomicWrite, ensureEncryptedDatabaseKey } from "./primary-host-profile.mjs";
+import { createProviderRegistry, PROVIDER_IDS } from "./connectivity/index.mjs";
 import {
   decodeRendererAttachment,
   decryptDownloadedAttachment,
@@ -84,6 +85,8 @@ let serverState = null; // estado do server do host
 let channelSeq = new Map();
 let appQuitting = false;
 let callIceConfiguration = null;
+const connectivityProviders = createProviderRegistry();
+let runningProviderId = null;
 const decryptedAttachments = new Map();
 const MAX_DECRYPTED_ATTACHMENT_CACHE_BYTES = 128 * 1024 * 1024;
 const DECRYPTED_ATTACHMENT_TTL_MS = 15 * 60_000;
@@ -174,6 +177,8 @@ function safeAttachmentMimeType(value) {
 const DEFAULT_CONNECTIVITY_CONFIG = {
   bridges: [],
   bridgePairings: [],
+  activeRoute: null,
+  providerSettings: null,
   backgroundHosting: false,
   hostHighWater: { version: 1, marks: [] },
   authorityTrust: { version: 1, servers: [] },
@@ -201,6 +206,9 @@ function connectivityMacKeyPath() {
 }
 function connectivityAnchorPath() {
   return path.join(userData(), "connectivity.counter-anchor.safe-storage");
+}
+function connectivityProviderSecretsPath() {
+  return path.join(userData(), "connectivity.provider-secrets.safe-storage");
 }
 function communityHostProfilePath(serverId) {
   return path.join(userData(), "community-hosts", `${serverId}.vault`);
@@ -368,10 +376,68 @@ function parseConnectivityConfigValue(value) {
         && typeof candidate.tokenHash === "string" && /^[0-9a-f]{64}$/i.test(candidate.tokenHash)
         && Number.isSafeInteger(candidate.expiresAt) && candidate.expiresAt > 0
       ))) : {};
-    return { bridges, bridgePairings, backgroundHosting: value?.backgroundHosting === true, hostHighWater, authorityTrust, legacyHostPins, pendingLegacyHostConfirmations };
+    const activeRoute = parsePersistedProviderRoute(value?.activeRoute);
+    const providerSettings = parsePersistedProviderSettings(value?.providerSettings, activeRoute?.provider);
+    return { bridges, bridgePairings, activeRoute, providerSettings, backgroundHosting: value?.backgroundHosting === true, hostHighWater, authorityTrust, legacyHostPins, pendingLegacyHostConfirmations };
   } catch {
     return { ...DEFAULT_CONNECTIVITY_CONFIG, hostHighWater: null, authorityTrust: null };
   }
+}
+
+const CONNECTIVITY_PROVIDER_IDS = new Set(["tailscale", "ngrok", "cloudflare", "manual"]);
+
+function parsePersistedProviderRoute(value) {
+  if (value == null) return null;
+  try {
+    if (!CONNECTIVITY_PROVIDER_IDS.has(value.provider) || !["ready", "limited", "error"].includes(value.status)
+      || !["direct-only", "turn"].includes(value.media) || typeof value.stable !== "boolean"
+      || !Number.isSafeInteger(value.startedAt) || value.startedAt < 0) return null;
+    const endpoint = new URL(value.endpoint);
+    if (endpoint.protocol !== "wss:" || endpoint.username || endpoint.password || endpoint.hash) return null;
+    if (!endpoint.pathname.endsWith("/signal")) endpoint.pathname = `${endpoint.pathname.replace(/\/$/, "")}/signal`;
+    const expiresAt = value.expiresAt == null ? undefined : Number(value.expiresAt);
+    if (expiresAt !== undefined && (!Number.isSafeInteger(expiresAt) || expiresAt <= value.startedAt)) return null;
+    return {
+      provider: value.provider,
+      endpoint: endpoint.href,
+      status: value.status,
+      media: value.media,
+      stable: value.stable,
+      startedAt: value.startedAt,
+      ...(expiresAt ? { expiresAt } : {}),
+      ...(typeof value.detail === "string" ? { detail: value.detail.slice(0, 240) } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parsePersistedProviderSettings(value, provider) {
+  if (!provider || !value || typeof value !== "object" || value.provider !== provider) return null;
+  const mode = typeof value.mode === "string" ? value.mode.slice(0, 32) : "default";
+  const domain = typeof value.domain === "string" ? value.domain.trim().toLowerCase().slice(0, 253) : undefined;
+  return { provider, mode, ...(domain ? { domain } : {}) };
+}
+
+function readProviderSecrets() {
+  const file = connectivityProviderSecretsPath();
+  if (!existsSync(file)) return {};
+  if (!safeStorageUsable()) throw new Error("o cofre seguro do sistema operacional não está disponível");
+  const parsed = JSON.parse(safeStorage.decryptString(readFileSync(file)));
+  if (!parsed || parsed.version !== 1 || typeof parsed.values !== "object") throw new Error("provider secret store inválido");
+  return Object.fromEntries(Object.entries(parsed.values).filter(([key, secret]) => (
+    ["ngrok", "cloudflare"].includes(key) && typeof secret === "string" && secret.length >= 8 && secret.length <= 4096
+  )));
+}
+
+function writeProviderSecrets(values) {
+  if (!safeStorageUsable()) throw new Error("o cofre seguro do sistema operacional não está disponível");
+  const filtered = Object.fromEntries(Object.entries(values).filter(([key, secret]) => (
+    ["ngrok", "cloudflare"].includes(key) && typeof secret === "string" && secret.length >= 8 && secret.length <= 4096
+  )));
+  const encrypted = safeStorage.encryptString(JSON.stringify({ version: 1, values: filtered }));
+  mkdirSync(userData(), { recursive: true });
+  writePrivateAtomic(connectivityProviderSecretsPath(), encrypted);
 }
 
 function closedConnectivityConfig(reason) {
@@ -468,6 +534,87 @@ function bridgeSummary(descriptor) {
 function emitSetupStep(step, status, detail) {
   notifyRenderer("connectivity.setup", { step, status, ...(detail ? { detail } : {}) });
 }
+
+const UI_PROVIDER_TO_RUNTIME = Object.freeze({
+  tailscale: PROVIDER_IDS.TAILSCALE_FUNNEL,
+  ngrok: PROVIDER_IDS.NGROK,
+  manual: PROVIDER_IDS.MANUAL_NGINX,
+});
+
+function runtimeProviderId(provider, mode) {
+  if (provider === "cloudflare") {
+    return mode === "named" ? PROVIDER_IDS.CLOUDFLARED_NAMED : PROVIDER_IDS.CLOUDFLARED_QUICK;
+  }
+  return UI_PROVIDER_TO_RUNTIME[provider] ?? null;
+}
+
+function normalizeProviderStartInput(provider, value) {
+  if (!CONNECTIVITY_PROVIDER_IDS.has(provider) || !value || typeof value !== "object" || Array.isArray(value)) {
+    throw Object.assign(new Error("opção de conexão inválida"), { code: "invalid_input" });
+  }
+  const allowed = provider === "cloudflare" ? ["mode", "token", "hostname"]
+    : provider === "ngrok" ? ["token"] : provider === "manual" ? ["domain"] : [];
+  if (Object.keys(value).some((key) => !allowed.includes(key))) {
+    throw Object.assign(new Error("configuração de conexão contém campos desconhecidos"), { code: "invalid_input" });
+  }
+  const mode = provider === "cloudflare" && value.mode === "named" ? "named"
+    : provider === "cloudflare" ? "quick" : "default";
+  const token = typeof value.token === "string" ? value.token.trim() : "";
+  if (token.length > 4096 || /[\0\r\n]/.test(token)) throw Object.assign(new Error("token inválido"), { code: "invalid_input" });
+  const rawDomain = provider === "manual" ? value.domain : value.hostname;
+  const domain = typeof rawDomain === "string" ? rawDomain.trim().toLowerCase().replace(/\.$/, "") : "";
+  if (domain && (domain.length > 253 || !domain.includes(".")
+    || !domain.split(".").every((part) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(part)))) {
+    throw Object.assign(new Error("domínio inválido"), { code: "invalid_input" });
+  }
+  if ((provider === "manual" || (provider === "cloudflare" && mode === "named")) && !domain) {
+    throw Object.assign(new Error("informe o domínio público"), { code: "invalid_input" });
+  }
+  return { provider, mode, token, domain };
+}
+
+function providerRouteEndpoint(endpoint) {
+  const url = new URL(endpoint);
+  if (url.protocol !== "wss:" || url.username || url.password || url.search || url.hash) {
+    throw Object.assign(new Error("o provedor não retornou um endpoint WSS público válido"), { code: "verification_failed" });
+  }
+  if (!url.pathname.endsWith("/signal")) url.pathname = `${url.pathname.replace(/\/$/, "")}/signal`;
+  return url.href;
+}
+
+async function probeProviderRoute(endpoint, timeoutMs = 15_000) {
+  const ws = createExternalWebSocket(endpoint);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ws.removeAllListeners();
+      try { ws.close(); } catch { /* closed during verification */ }
+      if (error) reject(error); else resolve(true);
+    };
+    const timer = setTimeout(() => finish(Object.assign(new Error("o endpoint WSS não respondeu no tempo esperado"), { code: "wss_failed" })), timeoutMs);
+    timer.unref?.();
+    ws.once("open", () => finish());
+    ws.once("error", () => finish(Object.assign(new Error("não foi possível validar DNS, TLS e WebSocket"), { code: "wss_failed" })));
+  });
+}
+
+function publicProviderRoute(provider, status) {
+  const endpoint = providerRouteEndpoint(status.endpoint);
+  const temporary = status.state === "limited" || status.stability === "temporary";
+  return {
+    provider,
+    endpoint,
+    status: temporary ? "limited" : "ready",
+    media: "direct-only",
+    stable: ["account", "operator"].includes(status.stability),
+    startedAt: Date.now(),
+    ...(temporary ? { expiresAt: Date.now() + 8 * 3600_000 } : {}),
+    detail: status.message || "Rota WSS pronta. Voz e vídeo continuam em conexão direta sem TURN.",
+  };
+}
 function janjanodeMainPath() {
   return app.isPackaged
     ? require.resolve("@janjacord/janjanode")
@@ -563,6 +710,18 @@ function initLocalDb() {
   );
 }
 
+function janjaNodeDirectRouteHints(config) {
+  const route = config?.activeRoute;
+  if (!route || route.status === "error" || (route.expiresAt && route.expiresAt <= Date.now())) return [];
+  return [{
+    provider: route.provider,
+    endpoint: route.endpoint,
+    stable: route.stable,
+    startedAt: route.startedAt,
+    ...(route.expiresAt ? { expiresAt: route.expiresAt } : {}),
+  }];
+}
+
 // ---------------------------------------------------------------- janjanode (host)
 function spawnHost() {
   if (hostProcess) return;
@@ -587,6 +746,7 @@ function spawnHost() {
     JC_SERVER_NAME: "Meu Servidor",
     JC_PORT: String(HOST_PORT),
     JC_DIRECT_ENDPOINT: privateLanEndpoint(),
+    JC_DIRECT_ROUTE_HINTS: JSON.stringify(janjaNodeDirectRouteHints(connectivity)),
     JC_BRIDGE_DESCRIPTORS: JSON.stringify(connectivity.bridges),
     JC_BRIDGE_PAIRINGS: JSON.stringify(connectivity.bridgePairings ?? []),
     ...(firstRendezvous ? { JC_RENDEZVOUS_URL: firstRendezvous } : {}),
@@ -614,6 +774,7 @@ function backgroundHostMaterial() {
   if (authoritySeed.equals(hostSeed) || authoritySeed.equals(identity.seed) || hostSeed.equals(identity.seed)) {
     throw new Error("material de chave do host não é independente");
   }
+  const connectivity = readConnectivityConfig();
   return {
     version: 1,
     serverId: primaryProfile.serverId,
@@ -623,7 +784,8 @@ function backgroundHostMaterial() {
     ownerIdentityId: identity.identityId,
     ownerNickname: identity.nickname,
     ownerPublicKey: ed25519PublicKey(identity.seed).toString("base64url"),
-    bridges: readConnectivityConfig().bridges,
+    bridges: connectivity.bridges,
+    directRouteHints: janjaNodeDirectRouteHints(connectivity),
     createdAt: Date.now(),
   };
 }
@@ -653,7 +815,7 @@ function readBackgroundHostBundle() {
     || !/^[0-9a-f]{64}$/i.test(material.authoritySeed ?? "")
     || !/^[0-9a-f]{64}$/i.test(material.hostSeed ?? "")
     || typeof material.ownerIdentityId !== "string" || typeof material.ownerPublicKey !== "string"
-    || !Array.isArray(material.bridges)) throw new Error("bundle de hosting em segundo plano inválido");
+    || !Array.isArray(material.bridges) || !Array.isArray(material.directRouteHints ?? [])) throw new Error("bundle de hosting em segundo plano inválido");
   return material;
 }
 
@@ -731,6 +893,7 @@ function spawnBackgroundHost() {
       JC_SERVER_NAME: "Meu Servidor",
       JC_PORT: String(HOST_PORT),
       JC_DIRECT_ENDPOINT: privateLanEndpoint(),
+      JC_DIRECT_ROUTE_HINTS: JSON.stringify(material.directRouteHints ?? []),
       JC_BRIDGE_DESCRIPTORS: JSON.stringify(material.bridges),
       JC_BRIDGE_PAIRINGS: "[]",
       ...(firstRendezvous ? { JC_RENDEZVOUS_URL: firstRendezvous } : {}),
@@ -1937,9 +2100,135 @@ function registerIpc() {
       ok: true,
       data: {
         bridges: config.bridges.map(bridgeSummary),
+        activeRoute: config.activeRoute,
         backgroundHosting: config.backgroundHosting,
       },
     };
+  });
+  ipcMain.handle("connectivity.providers", async () => {
+    try {
+      const config = readConnectivityConfig();
+      const secrets = readProviderSecrets();
+      const detections = await Promise.all([
+        ["tailscale", PROVIDER_IDS.TAILSCALE_FUNNEL],
+        ["ngrok", PROVIDER_IDS.NGROK],
+        ["cloudflare", PROVIDER_IDS.CLOUDFLARED_QUICK],
+        ["manual", PROVIDER_IDS.MANUAL_NGINX],
+      ].map(async ([id, runtimeId]) => {
+        const detected = await connectivityProviders.detect(runtimeId).catch(() => ({ installed: false, message: "Agente não detectado." }));
+        return {
+          id,
+          installed: id === "manual" ? true : detected.installed === true,
+          ...(id === "ngrok" ? { authenticated: Boolean(secrets.ngrok) } : {}),
+          detail: detected.message || undefined,
+        };
+      }));
+      return { ok: true, data: { providers: detections, activeRoute: config.activeRoute } };
+    } catch (error) {
+      return { ok: false, error: { code: "unavailable", message: String(error?.message ?? error) } };
+    }
+  });
+  ipcMain.handle("connectivity.provider.start", async (_e, { provider, config: rawConfig }) => {
+    let runtimeId = null;
+    try {
+      if (!identity || !hostProcess || !serverState) {
+        return { ok: false, error: { code: "host_offline", message: "Crie e mantenha uma comunidade neste computador antes de publicar a conexão." } };
+      }
+      const input = normalizeProviderStartInput(provider, rawConfig ?? {});
+      runtimeId = runtimeProviderId(input.provider, input.mode);
+      if (!runtimeId) return { ok: false, error: { code: "invalid_input", message: "Opção de conexão inválida." } };
+
+      if (runningProviderId && runningProviderId !== runtimeId) {
+        await connectivityProviders.stop(runningProviderId).catch(() => {});
+        runningProviderId = null;
+      }
+
+      const secrets = readProviderSecrets();
+      if (input.provider === "ngrok" && input.token) secrets.ngrok = input.token;
+      if (input.provider === "cloudflare" && input.mode === "named" && input.token) secrets.cloudflare = input.token;
+      if (input.provider === "ngrok" && !secrets.ngrok) {
+        return { ok: false, error: { code: "auth_required", message: "Informe o authtoken do ngrok uma vez." } };
+      }
+      if (input.provider === "cloudflare" && input.mode === "named" && !secrets.cloudflare) {
+        return { ok: false, error: { code: "auth_required", message: "Informe o token do Cloudflare Tunnel." } };
+      }
+      if ((input.provider === "ngrok" && input.token) || (input.provider === "cloudflare" && input.mode === "named" && input.token)) {
+        writeProviderSecrets(secrets);
+      }
+
+      const options = input.provider === "ngrok"
+        ? { env: { NGROK_AUTHTOKEN: secrets.ngrok }, startupTimeoutMs: 45_000 }
+        : input.provider === "cloudflare" && input.mode === "named"
+          ? { env: { TUNNEL_TOKEN: secrets.cloudflare }, endpoint: `wss://${input.domain}/`, startupTimeoutMs: 45_000 }
+          : input.provider === "cloudflare"
+            ? { startupTimeoutMs: 45_000 }
+            : input.provider === "manual"
+              ? { endpoint: `wss://${input.domain}/` }
+              : { startupTimeoutMs: 45_000 };
+      const started = await connectivityProviders.start(runtimeId, options);
+      if (input.provider === "manual" && started.nginxConfig) {
+        const configFile = path.join(userData(), "connectivity", "janjacord-nginx.conf");
+        mkdirSync(path.dirname(configFile), { recursive: true });
+        durableAtomicWrite(configFile, started.nginxConfig);
+        chmodSync(configFile, 0o600);
+        const { shell } = await import("electron");
+        shell.showItemInFolder(configFile);
+      } else {
+        runningProviderId = runtimeId;
+      }
+
+      const endpoint = providerRouteEndpoint(started.endpoint);
+      try {
+        await probeProviderRoute(endpoint);
+      } catch (error) {
+        if (input.provider === "manual") {
+          throw Object.assign(new Error(`Configuração Nginx gerada. Aplique-a, confirme DNS/TLS e tente novamente. ${String(error?.message ?? error)}`), { code: "verification_failed" });
+        }
+        throw error;
+      }
+
+      const route = publicProviderRoute(input.provider, { ...started, endpoint });
+      const current = readConnectivityConfig();
+      const next = {
+        ...current,
+        activeRoute: route,
+        providerSettings: { provider: input.provider, mode: input.mode, ...(input.domain ? { domain: input.domain } : {}) },
+      };
+      const restartError = await applyConnectivityConfigAndReconfigure(next);
+      if (restartError) route.detail = "Rota validada; reabra o app para concluir a atualização do host.";
+      return { ok: true, data: route };
+    } catch (error) {
+      if (runtimeId && runningProviderId === runtimeId) {
+        await connectivityProviders.stop(runtimeId).catch(() => {});
+        runningProviderId = null;
+      }
+      return {
+        ok: false,
+        error: {
+          code: error?.code === "not_installed" ? "provider_not_installed"
+            : error?.code === "missing_secret" ? "auth_required" : error?.code ?? "unavailable",
+          message: String(error?.message ?? "Não foi possível ativar esta rota."),
+        },
+      };
+    }
+  });
+  ipcMain.handle("connectivity.provider.stop", async () => {
+    try {
+      const current = readConnectivityConfig();
+      const runtimeId = runningProviderId ?? runtimeProviderId(current.activeRoute?.provider, current.providerSettings?.mode);
+      if (runtimeId) await connectivityProviders.stop(runtimeId).catch(() => {});
+      runningProviderId = null;
+      const restartError = await applyConnectivityConfigAndReconfigure({ ...current, activeRoute: null, providerSettings: null });
+      return {
+        ok: true,
+        data: {
+          stopped: true,
+          ...(restartError ? { warning: "Rota removida; reabra o app para concluir a atualização do host." } : {}),
+        },
+      };
+    } catch (error) {
+      return { ok: false, error: { code: "unavailable", message: String(error?.message ?? error) } };
+    }
   });
   ipcMain.handle("connectivity.ice-config", async () => {
     if (callIceConfiguration) return { ok: true, data: callIceConfiguration };

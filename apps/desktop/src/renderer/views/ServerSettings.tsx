@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { HardDrive, Link2, LoaderCircle, Network, Plus, RefreshCw, ShieldCheck, Trash2, X } from "lucide-react";
 import { BridgePairingDialog } from "./BridgePairingDialog";
+import { ConnectivityWizard } from "./ConnectivityWizard";
 import { friendlyIpcError, rejectedIpcError } from "../ipcErrors";
 
 interface Member {
@@ -102,6 +103,7 @@ export function ServerSettings({ server, onClose }: { server: ServerState; onClo
   const [newChannelName, setNewChannelName] = useState("");
   const [newChannelType, setNewChannelType] = useState<"text" | "call">("call");
   const [showBridgePairing, setShowBridgePairing] = useState(false);
+  const [showConnectivityWizard, setShowConnectivityWizard] = useState(false);
   const [bridges, setBridges] = useState<{ bridgeId: string; endpoint: string; expiresAt: number }[]>([]);
   const [backgroundHosting, setBackgroundHosting] = useState(false);
   const [hostGrants, setHostGrants] = useState<HostGrant[]>(server.hostGrants ?? []);
@@ -131,7 +133,7 @@ export function ServerSettings({ server, onClose }: { server: ServerState; onClo
   const nestedDialogOpenRef = useRef(false);
 
   closeRef.current = onClose;
-  nestedDialogOpenRef.current = showBridgePairing || Boolean(confirmRevoke);
+  nestedDialogOpenRef.current = showBridgePairing || showConnectivityWizard || Boolean(confirmRevoke);
 
   const currentRole = server.roles.find((role) => role.id === server.me.roleId);
   const canManageHosts = currentRole?.permissions.includes("manage_hosts") ?? false;
@@ -403,7 +405,7 @@ export function ServerSettings({ server, onClose }: { server: ServerState; onClo
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       data-smoke-screen="settings"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !showBridgePairing) onClose();
+        if (event.target === event.currentTarget && !showBridgePairing && !showConnectivityWizard) onClose();
       }}
     >
       <div
@@ -652,6 +654,23 @@ export function ServerSettings({ server, onClose }: { server: ServerState; onClo
 
           {tab === "connectivity" && (
             <div className="space-y-5">
+              <div className="settings-row flex items-start justify-between gap-4 border-b border-zinc-800 pb-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <Network className="h-4 w-4 shrink-0 text-sky-400" aria-hidden />
+                    <p className="text-sm font-medium text-zinc-200">Acesso externo sem VPS</p>
+                  </div>
+                  <p className="mt-1 text-xs leading-5 text-zinc-400">Publique este host com Tailscale, ngrok, Cloudflare ou domínio próprio.</p>
+                  {!isOwner && <p className="mt-1 text-[11px] text-zinc-500">Somente o Owner pode alterar a rota pública da comunidade.</p>}
+                </div>
+                <button
+                  className="shrink-0 rounded-md bg-sky-600 px-3 py-2 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+                  onClick={() => setShowConnectivityWizard(true)}
+                  disabled={!isOwner || connectivityLoadState === "loading"}
+                >
+                  Configurar conexão
+                </button>
+              </div>
               <div>
                 <div className="flex items-center justify-between">
                   <div>
@@ -961,6 +980,13 @@ export function ServerSettings({ server, onClose }: { server: ServerState; onClo
           )}
         </div>
       </div>
+      {showConnectivityWizard && (
+        <ConnectivityWizard
+          onClose={() => setShowConnectivityWizard(false)}
+          onChanged={loadConnectivity}
+          onOpenAdvanced={() => setShowBridgePairing(true)}
+        />
+      )}
       {showBridgePairing && <BridgePairingDialog onClose={() => setShowBridgePairing(false)} onAdded={loadConnectivity} />}
     </div>
   );

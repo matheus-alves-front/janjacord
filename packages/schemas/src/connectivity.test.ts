@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   BridgeDescriptorPayloadSchema,
   BridgeRegistrationProofPayloadSchema,
+  DirectRouteHintPayloadSchema,
+  DirectRouteHintsConfigSchema,
   HostAuthChallengePayloadSchema,
   HostCommandSchema,
   HostGrantPayloadSchema,
@@ -9,15 +11,18 @@ import {
   HostRecordPayloadSchema,
   HostRegistrationSchema,
   InviteV3PayloadSchema,
+  InviteV4PayloadSchema,
   SignedIceAccessProofSchema,
   PermissionFlagSchema,
   SignedBridgeDescriptorSchema,
   SignedBridgeRegistrationProofSchema,
+  SignedDirectRouteHintSchema,
   SignedHostGrantRevocationSchema,
   SignedHostGrantSchema,
   SignedHostAuthChallengeSchema,
   SignedHostRecordSchema,
   SignedInviteV3Schema,
+  SignedInviteV4Schema,
 } from "./index.js";
 
 const SERVER_ID = "11111111-1111-4111-8111-111111111111";
@@ -35,6 +40,25 @@ const bridgePayload = {
 
 const signedBridge = {
   payload: bridgePayload,
+  publicKey: PUBLIC_KEY,
+  signature: SIGNATURE,
+};
+
+const directRoutePayload = {
+  version: 1,
+  provider: "tailscale",
+  routeId: "route-primary",
+  endpoint: "wss://host.example.test/signal",
+  serverId: SERVER_ID,
+  hostId: "primary-host",
+  hostPublicKey: PUBLIC_KEY,
+  stable: true,
+  issuedAt: 1_000,
+  expiresAt: 2_000,
+} as const;
+
+const signedDirectRoute = {
+  payload: directRoutePayload,
   publicKey: PUBLIC_KEY,
   signature: SIGNATURE,
 };
@@ -156,6 +180,82 @@ describe("connectivity schemas", () => {
     } as const;
     expect(BridgeRegistrationProofPayloadSchema.parse(registrationProof)).toEqual(registrationProof);
     expect(SignedBridgeRegistrationProofSchema.parse({ payload: registrationProof, publicKey: PUBLIC_KEY, signature: SIGNATURE }).payload.recordHash).toBe("ab".repeat(32));
+  });
+
+  it("accepts strict direct-route config and a host-key-bound JC4 invite", () => {
+    expect(DirectRouteHintsConfigSchema.parse([{
+      provider: "ngrok",
+      endpoint: "wss://route.example.test/signal",
+      stable: false,
+      expiresAt: 3_000,
+    }])).toHaveLength(1);
+    expect(DirectRouteHintPayloadSchema.parse(directRoutePayload)).toEqual(directRoutePayload);
+    expect(SignedDirectRouteHintSchema.parse(signedDirectRoute)).toEqual(signedDirectRoute);
+
+    const invite = {
+      version: 4,
+      serverId: SERVER_ID,
+      authorityFingerprint: "ab".repeat(32),
+      inviteSecret: "A".repeat(22),
+      directRouteHints: [signedDirectRoute],
+      bridgeHints: [signedBridge],
+      issuedAt: 1_000,
+      expiresAt: 3_000,
+    } as const;
+    expect(InviteV4PayloadSchema.parse(invite)).toEqual(invite);
+    expect(SignedInviteV4Schema.parse({ payload: invite, publicKey: PUBLIC_KEY, signature: SIGNATURE }))
+      .toMatchObject({ payload: { serverId: SERVER_ID } });
+  });
+
+  it("rejects unsafe, oversized, duplicate, cross-server, and authority-mismatched direct routes", () => {
+    expect(DirectRouteHintsConfigSchema.safeParse([{
+      provider: "manual",
+      endpoint: "ws://host.example.test/signal",
+      stable: true,
+      expiresAt: 3_000,
+    }]).success).toBe(false);
+    expect(DirectRouteHintsConfigSchema.safeParse([{
+      provider: "unknown",
+      endpoint: "wss://host.example.test/signal",
+      stable: true,
+      expiresAt: 3_000,
+    }]).success).toBe(false);
+    expect(DirectRouteHintsConfigSchema.safeParse([{
+      provider: "manual",
+      endpoint: "wss://host.example.test/signal",
+      stable: true,
+      expiresAt: 3_000,
+      token: "must-not-pass",
+    }]).success).toBe(false);
+    expect(DirectRouteHintsConfigSchema.safeParse(Array.from({ length: 4 }, (_, index) => ({
+      provider: "manual",
+      endpoint: `wss://host-${index}.example.test/signal`,
+      stable: true,
+      expiresAt: 3_000,
+    }))).success).toBe(false);
+
+    const invite = {
+      version: 4,
+      serverId: SERVER_ID,
+      authorityFingerprint: "ab".repeat(32),
+      inviteSecret: "A".repeat(22),
+      directRouteHints: [signedDirectRoute],
+      bridgeHints: [],
+      issuedAt: 1_000,
+      expiresAt: 3_000,
+    } as const;
+    expect(InviteV4PayloadSchema.safeParse({
+      ...invite,
+      directRouteHints: [{
+        ...signedDirectRoute,
+        payload: { ...directRoutePayload, serverId: "22222222-2222-4222-8222-222222222222" },
+      }],
+    }).success).toBe(false);
+    expect(SignedInviteV4Schema.safeParse({
+      payload: invite,
+      publicKey: "C".repeat(43),
+      signature: SIGNATURE,
+    }).success).toBe(false);
   });
 
   it("rejects an invite with more than three bridge hints", () => {

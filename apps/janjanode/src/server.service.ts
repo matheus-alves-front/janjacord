@@ -21,6 +21,7 @@ import type {
   MessageEnvelope,
   Role,
   SignedBridgeDescriptor,
+  SignedDirectRouteHint,
   SignedHostGrant,
   SignedIceAccessProof,
 } from "@janjacord/schemas";
@@ -29,6 +30,7 @@ import {
   ATTACHMENT_ENCRYPTION_OVERHEAD_BYTES,
   BridgePairingBindingSchema,
   BridgeRegistrationChallengeSchema,
+  DirectRouteHintsConfigSchema,
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_CHUNK_BASE64_CHARS,
   ROLE_LEVELS,
@@ -57,18 +59,24 @@ import {
   createSignedHostAuthChallenge,
   createSignedHostGrantRevocation,
   createSignedHostRecord,
-  createSignedInviteV3,
+  createSignedDirectRouteHint,
+  createSignedInviteV4,
   createSignedBridgeRegistrationProof,
   decodeAttachmentChunk,
   decodeEnvelope,
-  formatInviteV3,
+  formatInviteV4,
   hostRegistrationRecordHash,
   parseInviteV3,
+  parseInviteV4,
   verifyHostRegistration,
   verifySignedHostGrant,
   verifySignedBridgeDescriptor,
 } from "@janjacord/protocol";
-import { browserRtcIceConfiguration, parseTemporaryTurnCredentials } from "@janjacord/networking";
+import {
+  browserRtcIceConfiguration,
+  parseTemporaryTurnCredentials,
+  type IceServerConfig,
+} from "@janjacord/networking";
 import type { Store } from "./store.js";
 
 export type HostResult<T> = { ok: true; data: T } | { ok: false; error: { code: string; message: string } };
@@ -94,6 +102,18 @@ function trustedBridgePublicKeys(): Map<string, string> {
     if (descriptor) trusted.set(descriptor.payload.bridgeId, descriptor.publicKey);
   }
   return trusted;
+}
+
+function configuredBaseStunServers(): IceServerConfig[] {
+  try {
+    const parsed = JSON.parse(process.env.JC_ICE_SERVERS ?? "[]") as unknown;
+    if (!Array.isArray(parsed)) return [];
+    // Reuse the shared boundary so static TURN credentials and malformed STUN URLs fail closed.
+    browserRtcIceConfiguration(parsed as IceServerConfig[], null, "direct");
+    return parsed as IceServerConfig[];
+  } catch {
+    return [];
+  }
 }
 
 export function validObservedPromotionCertificate(
@@ -1333,14 +1353,16 @@ export class ServerService {
   joinByInvite(identityId: string, nickname: string, secret: string, devicePublicKey: string): HostResult<Record<string, unknown>> {
     if (this.getMember(identityId)) return fail("conflict", "already a member");
     if (this.isBanned(identityId)) return fail("banned", "identity banned from this server");
-    const parsedV3 = parseInviteV3(secret);
-    const parsedLegacy = parsedV3 ? null : parseInviteKey(secret);
-    if (!parsedV3 && !parsedLegacy) return fail("invalid_invite", "invite malformado ou assinatura inválida");
-    const inviteServerId = parsedV3?.payload.serverId ?? parsedLegacy!.serverId;
+    const parsedV4 = parseInviteV4(secret);
+    const parsedV3 = parsedV4 ? null : parseInviteV3(secret);
+    const parsedLegacy = parsedV4 || parsedV3 ? null : parseInviteKey(secret);
+    if (!parsedV4 && !parsedV3 && !parsedLegacy) return fail("invalid_invite", "invite malformado ou assinatura inválida");
+    const signedInvite = parsedV4 ?? parsedV3;
+    const inviteServerId = signedInvite?.payload.serverId ?? parsedLegacy!.serverId;
     if (inviteServerId !== this.serverId) return fail("invalid_invite", "invite de outro server");
-    if (parsedV3 && parsedV3.publicKey !== this.authorityPublicKey()) return fail("invalid_invite", "autoridade do invite não corresponde ao server");
-    const secretBytes = parsedV3
-      ? Buffer.from(parsedV3.payload.inviteSecret, "base64url")
+    if (signedInvite && signedInvite.publicKey !== this.authorityPublicKey()) return fail("invalid_invite", "autoridade do invite não corresponde ao server");
+    const secretBytes = signedInvite
+      ? Buffer.from(signedInvite.payload.inviteSecret, "base64url")
       : parsedLegacy!.secret;
     const hash = sha256Hex(createHmac("sha256", this.inviteHashKey()).update(secretBytes).digest());
     const invite = this.store.raw
@@ -1476,6 +1498,9 @@ export class ServerService {
     const secret = randomBytes(16);
     const issuedAt = Date.now();
     const expiresAt = issuedAt + (expiresInMs ?? 30 * 24 * 3600_000);
+    const directRoutes = this.configuredDirectRouteHints(authoritySeed, issuedAt);
+    if (!directRoutes.ok) return directRoutes;
+    const bridgeHints = this.configuredBridgeHints();
     const hash = sha256Hex(createHmac("sha256", this.inviteHashKey()).update(secret).digest());
     const accessHash = sha256Hex(secret);
     const id = randomUUID();
@@ -1484,28 +1509,33 @@ export class ServerService {
       .run(id, hash, accessHash, initialRoleId, maxUses, expiresAt, issuedAt);
     this.store.appendOp({ type: "inviteCreate", inviteId: id });
     this.events.emit("stateChanged");
-    const hints = this.configuredBridgeHints();
-    if (hints.length === 0) {
+    if (directRoutes.data.length === 0 && bridgeHints.length === 0) {
       const directEndpoint = process.env.JC_DIRECT_ENDPOINT ?? `127.0.0.1:${process.env.JC_PORT ?? "8931"}`;
       return ok({ inviteId: id, inviteKey: formatInviteKey(this.serverId, secret, directEndpoint) });
     }
-    for (let count = hints.length; count >= 0; count--) {
-      try {
-        const invite = createSignedInviteV3({
-          version: 3,
-          serverId: this.serverId,
-          authorityFingerprint: this.authorityFingerprint(),
-          inviteSecret: secret.toString("base64url"),
-          bridgeHints: hints.slice(0, count),
-          issuedAt,
-          expiresAt,
-        }, authoritySeed);
-        return ok({ inviteId: id, inviteKey: formatInviteV3(invite) });
-      } catch (error) {
-        if (count === 0) return fail("invalid_input", `could not encode JC3: ${(error as Error).message}`);
+    const minimumDirectRoutes = directRoutes.data.length > 0 ? 1 : 0;
+    const minimumBridgeHints = bridgeHints.length > 0 ? 1 : 0;
+    let lastError = "no connectivity hints fit";
+    for (let routeCount = directRoutes.data.length; routeCount >= minimumDirectRoutes; routeCount--) {
+      for (let bridgeCount = bridgeHints.length; bridgeCount >= minimumBridgeHints; bridgeCount--) {
+        try {
+          const invite = createSignedInviteV4({
+            version: 4,
+            serverId: this.serverId,
+            authorityFingerprint: this.authorityFingerprint(),
+            inviteSecret: secret.toString("base64url"),
+            directRouteHints: directRoutes.data.slice(0, routeCount),
+            bridgeHints: bridgeHints.slice(0, bridgeCount),
+            issuedAt,
+            expiresAt,
+          }, authoritySeed);
+          return ok({ inviteId: id, inviteKey: formatInviteV4(invite) });
+        } catch (error) {
+          lastError = (error as Error).message;
+        }
       }
     }
-    return fail("internal", "could not encode JC3");
+    return fail("invalid_input", `could not encode JC4: ${lastError}`);
   }
 
   inviteList(actorId: string): HostResult<Record<string, unknown>[]> {
@@ -1546,6 +1576,55 @@ export class ServerService {
     } catch {
       return [];
     }
+  }
+
+  private configuredDirectRouteHints(
+    authoritySeed: Buffer,
+    issuedAt: number,
+  ): HostResult<SignedDirectRouteHint[]> {
+    const source = process.env.JC_DIRECT_ROUTE_HINTS;
+    if (!source) return ok([]);
+    if (source.length > 16 * 1024) return fail("invalid_input", "JC_DIRECT_ROUTE_HINTS exceeds 16384 characters");
+    let input: unknown;
+    try {
+      input = JSON.parse(source);
+    } catch {
+      return fail("invalid_input", "JC_DIRECT_ROUTE_HINTS must be valid JSON");
+    }
+    const parsed = DirectRouteHintsConfigSchema.safeParse(input);
+    if (!parsed.success) return fail("invalid_input", "JC_DIRECT_ROUTE_HINTS does not match the strict route config schema");
+    if (parsed.data.length === 0) return ok([]);
+    const current = this.currentHostGrant(issuedAt);
+    if (!current.ok) return current;
+    const { grant, hostSeed } = current.data;
+    const hostPublicKey = ed25519PublicKey(hostSeed).toString("base64url");
+    const routes: SignedDirectRouteHint[] = [];
+    for (const route of parsed.data) {
+      if (route.expiresAt <= issuedAt) {
+        return fail("invalid_input", "JC_DIRECT_ROUTE_HINTS contains an expired route");
+      }
+      const routeId = `route-${sha256Hex(canonicalJson({
+        provider: route.provider,
+        endpoint: route.endpoint,
+        stable: route.stable,
+        serverId: this.serverId,
+        hostId: grant.payload.hostId,
+        hostPublicKey,
+      })).slice(0, 32)}`;
+      routes.push(createSignedDirectRouteHint({
+        version: 1,
+        provider: route.provider,
+        routeId,
+        endpoint: route.endpoint,
+        serverId: this.serverId,
+        hostId: grant.payload.hostId,
+        hostPublicKey,
+        stable: route.stable,
+        issuedAt,
+        expiresAt: route.expiresAt,
+      }, authoritySeed));
+    }
+    return ok(routes);
   }
 
   private configuredBridgePairings(): Map<string, string> {
@@ -1614,14 +1693,20 @@ export class ServerService {
 
   connectivityIceConfig(actorId: string): HostResult<ReturnType<typeof browserRtcIceConfiguration>> {
     if (!this.getMember(actorId)) return fail("forbidden", "active member required");
+    const policy = this.getConfig().networkPrivacy === "relay" ? "relay" : "direct";
     const now = Date.now();
     for (const [source, config] of this.bridgeIceConfigs) {
       if (config.expiresAt <= now) this.bridgeIceConfigs.delete(source);
     }
     const configs = [...this.bridgeIceConfigs.values()].sort((a, b) => b.expiresAt - a.expiresAt);
-    if (configs.length === 0) return fail("host_offline", "no valid temporary TURN credential is available");
-    const policy = this.getConfig().networkPrivacy === "relay" ? "relay" : "direct";
-    return ok(browserRtcIceConfiguration([], configs[0], policy));
+    if (configs.length === 0 && policy === "relay") {
+      return fail("host_offline", "no valid temporary TURN credential is available for relay-only policy");
+    }
+    try {
+      return ok(browserRtcIceConfiguration(configuredBaseStunServers(), configs[0] ?? null, policy));
+    } catch {
+      return fail("host_offline", "no valid temporary TURN credential is available for relay-only policy");
+    }
   }
 
   // --------------------------------------------------------- community hosts

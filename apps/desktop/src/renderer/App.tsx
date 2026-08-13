@@ -14,7 +14,10 @@ interface WindowApi {
   identityRestore: (recoveryKey: string, nickname: string, newPassword: string) => Promise<{ ok: boolean; error?: { message: string } }>;
   serverCreate: () => Promise<{ ok: boolean; data?: unknown; connectivity?: { bridgeReady: boolean; needsBridge: boolean }; error?: { code?: string; message: string } }>;
   serverJoin: (hostUrl: string, inviteKey: string, allowLegacyTrust?: boolean) => Promise<{ ok: boolean; data?: unknown; error?: IpcError }>;
-  connectivityStatus: () => Promise<{ ok: boolean; data?: { bridges: { bridgeId: string; endpoint: string; expiresAt: number }[]; backgroundHosting: boolean }; error?: IpcError }>;
+  connectivityStatus: () => Promise<{ ok: boolean; data?: { bridges: { bridgeId: string; endpoint: string; expiresAt: number }[]; activeRoute?: ConnectivityRoute | null; backgroundHosting: boolean }; error?: IpcError }>;
+  connectivityProviders: () => Promise<{ ok: boolean; data?: { providers: ConnectivityProvider[]; activeRoute?: ConnectivityRoute | null }; error?: IpcError }>;
+  connectivityProviderStart: (provider: ConnectivityProviderId, config: Record<string, string | boolean>) => Promise<{ ok: boolean; data?: ConnectivityRoute; error?: IpcError }>;
+  connectivityProviderStop: () => Promise<{ ok: boolean; data?: { stopped: boolean }; error?: IpcError }>;
   iceConfiguration: () => Promise<{ ok: boolean; data?: { iceServers: RTCIceServer[]; iceTransportPolicy: "all" | "relay"; expiresAt?: number }; error?: IpcError }>;
   bridgeAdd: (pairingCode: string) => Promise<{ ok: boolean; data?: { bridgeId: string; endpoint: string; expiresAt: number; warning?: string }; error?: IpcError }>;
   bridgeRemove: (bridgeId: string) => Promise<{ ok: boolean; error?: { message: string } }>;
@@ -42,6 +45,27 @@ interface WindowApi {
   clipboardClearIfEquals: (text: string) => Promise<{ ok: boolean; data?: { cleared: boolean }; error?: { message: string } }>;
   hostUrl: () => Promise<string>;
   on: (channel: string, cb: (data: unknown) => void) => void;
+}
+
+export type ConnectivityProviderId = "tailscale" | "ngrok" | "cloudflare" | "manual";
+
+export interface ConnectivityProvider {
+  id: ConnectivityProviderId;
+  installed: boolean;
+  authenticated?: boolean;
+  version?: string;
+  detail?: string;
+}
+
+export interface ConnectivityRoute {
+  provider: ConnectivityProviderId;
+  endpoint: string;
+  status: "ready" | "limited" | "error";
+  media: "direct-only" | "turn";
+  stable: boolean;
+  startedAt: number;
+  expiresAt?: number;
+  detail?: string;
 }
 
 declare global {

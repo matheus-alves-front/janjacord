@@ -3,17 +3,23 @@ import { ed25519Fingerprint, ed25519PublicKey } from "@janjacord/crypto";
 import {
   createSignedBridgeDescriptor,
   createSignedBridgeRegistrationProof,
+  createSignedDirectRouteHint,
   createSignedHostAuthChallenge,
   createSignedHostGrant,
   createSignedHostGrantRevocation,
   createSignedHostRecord,
   createSignedInviteV3,
+  createSignedInviteV4,
   createSignedSessionAuth,
   formatInviteV3,
+  formatInviteV4,
   hostRegistrationRecordHash,
   parseInviteV3,
+  parseInviteV4,
+  verifyDirectRouteHostAuthChallenge,
   verifyHostRegistration,
   verifySignedBridgeRegistrationProof,
+  verifySignedDirectRouteHint,
   verifySignedHostAuthChallenge,
   verifySignedHostGrantRevocation,
   verifySignedSessionAuth,
@@ -50,6 +56,91 @@ describe("connectivity signatures", () => {
     expect(parseInviteV3(`${key.slice(0, -1)}A`, now + 1)).toBeNull();
     expect(parseInviteV3(key, now + 30_000)).toBeNull();
     expect(parseInviteV3(`JC3-${"A".repeat(2049)}`, now)).toBeNull();
+  });
+
+  it("roundtrips JC4 while binding direct WSS routes to authority, server, host key, and expiry", () => {
+    const now = 5_000;
+    const authorityPublicKey = ed25519PublicKey(authoritySeed).toString("base64url");
+    const hostPublicKey = ed25519PublicKey(hostSeed).toString("base64url");
+    const route = createSignedDirectRouteHint({
+      version: 1,
+      provider: "cloudflare",
+      routeId: "route-cloudflare-primary",
+      endpoint: "wss://host.example/signal",
+      serverId: SERVER_ID,
+      hostId: "primary-host",
+      hostPublicKey,
+      stable: true,
+      issuedAt: now,
+      expiresAt: now + 60_000,
+    }, authoritySeed);
+    const bridgeSeed = Buffer.alloc(32, 4);
+    const bridgeFingerprint = ed25519Fingerprint(ed25519PublicKey(bridgeSeed));
+    const bridge = createSignedBridgeDescriptor({
+      version: 1,
+      bridgeId: `ed25519:${bridgeFingerprint}`,
+      endpoints: ["wss://bridge.example/rendezvous"],
+      issuedAt: now,
+      expiresAt: now + 120_000,
+    }, bridgeSeed);
+    const invite = createSignedInviteV4({
+      version: 4,
+      serverId: SERVER_ID,
+      authorityFingerprint: ed25519Fingerprint(ed25519PublicKey(authoritySeed)),
+      inviteSecret: Buffer.alloc(16, 9).toString("base64url"),
+      directRouteHints: [route],
+      bridgeHints: [bridge],
+      issuedAt: now,
+      expiresAt: now + 120_000,
+    }, authoritySeed);
+    const key = formatInviteV4(invite);
+    expect(parseInviteV4(key, now + 1)?.payload.directRouteHints[0]?.payload).toMatchObject({
+      endpoint: "wss://host.example/signal",
+      hostPublicKey,
+    });
+    expect(parseInviteV4(key, now + 1)?.payload.bridgeHints).toHaveLength(1);
+    expect(verifySignedDirectRouteHint(route, {
+      authorityPublicKey,
+      serverId: SERVER_ID,
+      hostId: "primary-host",
+      hostPublicKey,
+    }, now + 1)).not.toBeNull();
+    expect(verifySignedDirectRouteHint(route, {
+      authorityPublicKey,
+      serverId: SERVER_ID,
+      hostPublicKey: ed25519PublicKey(authoritySeed).toString("base64url"),
+    }, now + 1)).toBeNull();
+    expect(verifySignedDirectRouteHint(route, {
+      authorityPublicKey,
+      serverId: "22222222-2222-4222-8222-222222222222",
+    }, now + 1)).toBeNull();
+    const challenge = createSignedHostAuthChallenge({
+      version: 1,
+      serverId: SERVER_ID,
+      authorityFingerprint: ed25519Fingerprint(ed25519PublicKey(authoritySeed)),
+      hostId: route.payload.hostId,
+      grantId: GRANT_ID,
+      challengeId: "33333333-3333-4333-8333-333333333333",
+      nonce: Buffer.alloc(32, 7).toString("base64url"),
+      issuedAt: now,
+      expiresAt: now + 30_000,
+    }, hostSeed);
+    expect(verifyDirectRouteHostAuthChallenge(challenge, route, invite.publicKey, now + 1)).not.toBeNull();
+    const forgedChallenge = createSignedHostAuthChallenge(challenge.payload, authoritySeed);
+    expect(verifyDirectRouteHostAuthChallenge(forgedChallenge, route, invite.publicKey, now + 1)).toBeNull();
+    expect(parseInviteV4(key, now + 60_000)).toBeNull();
+    expect(parseInviteV4(`${key.slice(0, -1)}A`, now + 1)).toBeNull();
+    expect(parseInviteV4(`JC4-${"A".repeat(2049)}`, now)).toBeNull();
+
+    const tamperedHostKey = structuredClone(invite);
+    tamperedHostKey.payload.directRouteHints[0]!.payload.hostPublicKey = authorityPublicKey;
+    expect(() => createSignedDirectRouteHint({ ...route.payload, endpoint: "ws://host.example/signal" }, authoritySeed))
+      .toThrow();
+    expect(parseInviteV4(`JC4-${Buffer.from(JSON.stringify(tamperedHostKey)).toString("base64url")}`, now + 1))
+      .toBeNull();
+
+    // Legacy parsing remains isolated and valid; a JC4 failure never downgrades into JC3.
+    expect(parseInviteV3(key, now + 1)).toBeNull();
   });
 
   it("requires a valid, matching, unrevoked grant for a host record", () => {
