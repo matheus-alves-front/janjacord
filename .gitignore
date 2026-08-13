@@ -47,3 +47,6 @@ coverage/
 # Electron
 out/
 release/
+
+# Memoria operacional local (evidencias/screenshots) — canone em workspaces/<alias>/.memory/
+.memory/
