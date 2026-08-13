@@ -2734,12 +2734,73 @@ async function runUiSmoke(win) {
     revokedGrants.add(grantId);
     return { ok: true };
   });
+  // Stubs determinísticos do wizard de conectividade (TASK-007): detecção e ativação
+  // de rota sem executar agentes reais nem abrir túneis. A segunda detecção modela o
+  // usuário autenticando o ngrok fora do app (auth no agente).
+  let providerDetectCount = 0;
+  replaceHandler("connectivity.providers", async () => {
+    providerDetectCount += 1;
+    const ngrokAuthenticated = providerDetectCount >= 2;
+    return {
+      ok: true,
+      data: {
+        providers: [
+          { id: "tailscale", installed: true, authenticated: false, version: "1.94.2", detail: "CLI detectado." },
+          { id: "ngrok", installed: true, authenticated: ngrokAuthenticated, version: "3.39.5", detail: "CLI detectado." },
+          { id: "cloudflare", installed: false, detail: "Agente não detectado." },
+          { id: "manual", installed: true },
+        ],
+        activeRoute: null,
+      },
+    };
+  });
+  replaceHandler("connectivity.provider.start", async (_event, { provider, config }) => {
+    await pause(150);
+    if (provider === "ngrok" && !config?.token) {
+      return { ok: false, error: { code: "auth_required", message: "Informe o authtoken do ngrok uma vez." } };
+    }
+    if (provider === "manual") {
+      return { ok: false, error: { code: "verification_failed", message: "DNS, TLS e WSS não confirmados (simulado)" } };
+    }
+    if (provider === "cloudflare") {
+      const named = config?.mode === "named";
+      return {
+        ok: true,
+        data: {
+          provider,
+          endpoint: named ? `wss://${String(config.hostname)}/` : "wss://abc123.trycloudflare.com/",
+          status: named ? "ready" : "limited",
+          media: "direct-only",
+          stable: named,
+          startedAt: Date.now(),
+          ...(named ? {} : { detail: "URL temporária — reinicie o túnel para obter um novo endereço." }),
+        },
+      };
+    }
+    return {
+      ok: true,
+      data: {
+        provider,
+        endpoint: provider === "tailscale" ? "wss://smoke-machine.tail1234.ts.net/" : "wss://abc123.ngrok-free.app/",
+        status: "ready",
+        media: "direct-only",
+        stable: provider === "tailscale",
+        startedAt: Date.now(),
+      },
+    };
+  });
+  replaceHandler("connectivity.provider.stop", async () => ({ ok: true, data: { stopped: true } }));
 
   win.unmaximize();
   win.setContentSize(640, 480);
-  await pause(500);
-  const initialViewport = await js(`[window.innerWidth, window.innerHeight]`);
+  let initialViewport = await js(`[window.innerWidth, window.innerHeight]`);
+  for (let attempt = 0; attempt < 20 && (initialViewport[0] !== 640 || initialViewport[1] !== 480); attempt += 1) {
+    win.setContentSize(640, 480);
+    await pause(120);
+    initialViewport = await js(`[window.innerWidth, window.innerHeight]`);
+  }
   if (initialViewport[0] !== 640 || initialViewport[1] !== 480) throw new Error(`[smoke-ui] expected 640x480 content viewport, got ${initialViewport.join("x")}`);
+  await waitFor(`document.fonts.status === 'loaded'`, "fontes carregadas para métricas de layout estáveis", 15_000);
   await waitForText("Comunicador privado de comunidades");
   await assertSelector('form[data-smoke-screen="onboarding"]', "form de onboarding");
   await assertSelector('label[for="onboarding-nickname"]');
@@ -2915,6 +2976,101 @@ async function runUiSmoke(win) {
   if (resizedViewport[0] !== 960 || resizedViewport[1] !== 600) throw new Error(`[smoke-ui] expected resized 960x600 content viewport, got ${resizedViewport.join("x")}`);
   await assertText("Configurações do server");
   await shot("18-settings-responsive-960x600", ['[data-smoke-critical="settings-dialog"]']);
+
+  // --- TASK-007: wizard de conectividade plug-and-play (estados determinísticos)
+  const clickAriaExact = async (label) => {
+    const clicked = await js(`(() => {
+      const el = document.querySelector('button[aria-label=${JSON.stringify(label)}]');
+      if (!el || el.offsetParent === null || el.disabled) return false;
+      el.focus();
+      el.click();
+      return true;
+    })()`);
+    if (!clicked) throw new Error(`[smoke-ui] aria button not found: ${label}`);
+  };
+  const clickAriaPrefix = async (label) => {
+    const clicked = await js(`(() => {
+      const el = document.querySelector('button[aria-label^=${JSON.stringify(label)}]');
+      if (!el || el.offsetParent === null || el.disabled) return false;
+      el.focus();
+      el.click();
+      return true;
+    })()`);
+    if (!clicked) throw new Error(`[smoke-ui] aria-prefix button not found: ${label}`);
+  };
+  await clickText("Conectividade");
+  await waitForText("Acesso externo sem VPS");
+  await clickText("Configurar conexão");
+  await waitFor(`!!document.querySelector('[data-smoke-screen="connectivity-wizard"]')`, "wizard de conectividade abriu");
+  await waitForText("Escolha como publicar");
+  await assertSelector('button[aria-label^="Tailscale Funnel"]', "card Tailscale Funnel");
+  await assertSelector('button[aria-label^="ngrok"]', "card ngrok");
+  await assertSelector('button[aria-label^="Cloudflare Tunnel"]', "card Cloudflare Tunnel");
+  await assertSelector('button[aria-label^="Domínio próprio"]', "card Domínio próprio");
+  await assertText("Precisa instalar");
+  await assertText("Precisa entrar");
+  await assertText("Hospedagem avançada · JanjaBridge");
+  await shot("19-connectivity-choose-960x600", ['[data-smoke-screen="connectivity-wizard"]']);
+
+  await clickAriaPrefix("ngrok.");
+  await waitForText("Informe o authtoken ou autentique o agente ngrok.");
+  await assertSelector("#connectivity-ngrok-token", "campo authtoken ngrok");
+  await shot("20-ngrok-prereq-960x600", ['[data-smoke-screen="connectivity-wizard"]']);
+
+  await clickText("Outras opções");
+  await waitForText("Escolha como publicar");
+  await clickText("Detectar");
+  await waitForText("Detectado · 3.39.5");
+  await clickAriaPrefix("ngrok.");
+  await waitForText("Authtoken");
+  await setValue("#connectivity-ngrok-token", "smoke-ngrok-token");
+  await clickText("Detectar e ativar");
+  await waitForText("Conexão externa pronta", 20_000);
+  await assertText("wss://abc123.ngrok-free.app");
+  await assertNoText("smoke-ngrok-token");
+  await assertText("Mídia somente direta");
+  await assertText("endereço pode mudar");
+  await shot("21-ngrok-ready-960x600", ['[data-smoke-screen="connectivity-wizard"]']);
+
+  await clickText("Desligar rota");
+  await waitForText("Escolha como publicar", 20_000);
+  await shot("22-connectivity-choosing-960x600", ['[data-smoke-screen="connectivity-wizard"]']);
+
+  await clickAriaPrefix("Domínio próprio");
+  await waitForText("Gerar e verificar");
+  await setValue("#connectivity-manual-domain", "janja.seudominio.com");
+  await clickText("Gerar e verificar");
+  await waitForText("Não foi possível concluir", 20_000);
+  await assertText("não passou pela verificação externa de DNS, TLS e WSS");
+  await assertNoText("janja.seudominio.com");
+  await shot("23-manual-verification-failed-960x600", ['[data-smoke-screen="connectivity-wizard"]']);
+
+  await clickText("Trocar opção");
+  await waitForText("Escolha como publicar");
+  await clickAriaPrefix("Cloudflare Tunnel");
+  await waitForText("Tipo de túnel");
+  await assertText("A URL é temporária");
+  await shot("24-cloudflare-quick-960x600", ['[data-smoke-screen="connectivity-wizard"]']);
+  await clickText("Nomeado");
+  await waitFor(`!!document.querySelector('#connectivity-cloudflare-token')`, "token do túnel nomeado");
+  await assertSelector("#connectivity-cloudflare-domain", "hostname do túnel nomeado");
+  await shot("25-cloudflare-named-960x600", ['[data-smoke-screen="connectivity-wizard"]']);
+  await clickText("Cancelar");
+  await waitForText("Escolha como publicar");
+
+  expectedViewport = { width: 640, height: 480 };
+  win.unmaximize();
+  win.setContentSize(expectedViewport.width, expectedViewport.height);
+  await pause(180);
+  await shot("26-connectivity-choose-640x480", ['[data-smoke-screen="connectivity-wizard"]']);
+  await clickAriaPrefix("ngrok.");
+  await waitForText("Authtoken");
+  await shot("27-connectivity-ngrok-config-640x480", ['[data-smoke-screen="connectivity-wizard"]']);
+  await clickAriaExact("Fechar configuração de conexão");
+  await waitFor(`!document.querySelector('[data-smoke-screen="connectivity-wizard"]')`, "wizard fechou");
+  await pressEscape();
+  await waitFor(`!document.querySelector('[role="dialog"][aria-labelledby="server-settings-title"]')`, "settings fechou após wizard");
+
   const galleryManifest = await writePackagedUiGalleryExecutionManifest(shotDir, screenshotNames, startedAt);
   if (galleryManifest) console.log(`[smoke-ui] packaged execution manifest ${galleryManifest}`);
   console.log("[smoke-ui] DONE");
