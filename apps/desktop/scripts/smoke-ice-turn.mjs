@@ -21,6 +21,7 @@ import {
   decodeAttachmentChunk,
   encodeAttachmentChunks,
   parseInviteV3,
+  parseInviteV4,
 } from "@janjacord/protocol";
 import * as mls from "@janjacord/crypto-core";
 import { HostClient, IceHostTransport, verifyHostAuthenticationContext } from "@janjacord/networking";
@@ -352,8 +353,8 @@ async function main() {
 
     const invite = await ice.request({ type: "invite.create", initialRoleId: "role-member", maxUses: 1 });
     if (!invite?.ok) throw new Error(`relay invite creation failed: ${JSON.stringify(invite)}`);
-    const parsedInvite = parseInviteV3(invite.data.inviteKey);
-    if (!parsedInvite) throw new Error("relay invite was not JC3");
+    const parsedInvite = parseInviteV4(invite.data.inviteKey) ?? parseInviteV3(invite.data.inviteKey);
+    if (!parsedInvite) throw new Error("relay invite was neither JC4 nor JC3");
     const bobIce = new IceHostTransport({
       bridgeUrls: [`ws://127.0.0.1:${bridgePort}/signaling`],
       serverId: state.data.serverId,
