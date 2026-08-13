@@ -37,6 +37,7 @@ function fakeSpawn(onSpawn) {
     const child = new EventEmitter();
     child.stdout = new PassThrough();
     child.stderr = new PassThrough();
+    child.pid = 4200 + calls.length;
     child.exitCode = null;
     child.killed = false;
     child.signals = [];
@@ -289,7 +290,7 @@ describe("provider adapters", () => {
     const spawn = fakeSpawn();
     const registry = createProviderRegistry({ spawn, execFile: fakeExecFile() });
 
-    await expect(registry.start(PROVIDER_IDS.NGROK, { env: {} })).rejects.toMatchObject({ code: "missing_secret" });
+    await expect(registry.start(PROVIDER_IDS.CLOUDFLARED_NAMED, { env: {} })).rejects.toMatchObject({ code: "missing_secret" });
     await expect(registry.start(PROVIDER_IDS.CLOUDFLARED_NAMED, {
       env: { TUNNEL_TOKEN: "token" },
       endpoint: "wss://node.example.com",
@@ -299,5 +300,35 @@ describe("provider adapters", () => {
     reservedEnvironment.__proto__ = "pollution";
     await expect(registry.start(PROVIDER_IDS.NGROK, { env: reservedEnvironment })).rejects.toThrow(/reserved/);
     expect(spawn.calls).toHaveLength(0);
+  });
+
+  it("starts ngrok without an app token when the agent is already authenticated by its own config", async () => {
+    const spawn = fakeSpawn((child) => {
+      child.stdout.write(`${JSON.stringify({ url: "https://demo.ngrok-free.app" })}\n`);
+    });
+    const registry = createProviderRegistry({ spawn, execFile: fakeExecFile() });
+
+    await expect(registry.start(PROVIDER_IDS.NGROK, {
+      env: {},
+      startupTimeoutMs: 1_000,
+    })).resolves.toMatchObject({ state: "running", installed: true, endpoint: "wss://demo.ngrok-free.app/" });
+    expect(spawn.calls[0].options.env.NGROK_AUTHTOKEN).toBeUndefined();
+    const started = await registry.status(PROVIDER_IDS.NGROK);
+    expect(started.pid).toBeTypeOf("number");
+  });
+
+  it("maps an ngrok authentication failure to auth_required and cleans up", async () => {
+    const spawn = fakeSpawn((child) => {
+      child.stderr.write(JSON.stringify({ level: "error", msg: "failed to read authtoken: authtoken is required" }));
+      child.exitCode = 1;
+      child.emit("exit", 1);
+    });
+    const registry = createProviderRegistry({ spawn, execFile: fakeExecFile() });
+
+    await expect(registry.start(PROVIDER_IDS.NGROK, {
+      env: {},
+      startupTimeoutMs: 1_000,
+    })).rejects.toMatchObject({ code: "auth_required" });
+    await expect(registry.status(PROVIDER_IDS.NGROK)).resolves.toMatchObject({ state: "error", endpoint: null });
   });
 });

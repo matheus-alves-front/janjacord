@@ -59,6 +59,7 @@ function waitForEndpoint(child, {
   knownEndpoint = null,
   readyPattern = null,
   endpointPredicate = null,
+  authFailurePattern = null,
 }) {
   return new Promise((resolve, reject) => {
     let buffer = "";
@@ -79,6 +80,10 @@ function waitForEndpoint(child, {
     };
     const onData = (chunk) => {
       buffer = `${buffer}${String(chunk)}`.slice(-128 * 1024);
+      if (authFailurePattern?.test(buffer)) {
+        finish(reject, new ProviderError(provider, "auth_required", `${provider} requires authentication.`));
+        return;
+      }
       if (!knownEndpoint) {
         const endpoint = extractPublicWssEndpoint(buffer, { predicate: endpointPredicate });
         if (endpoint) {
@@ -115,6 +120,7 @@ function createManagedCliProvider({
   named = false,
   readyPattern = null,
   endpointPredicate = null,
+  authFailurePattern = null,
 }) {
   let child = null;
   let current = providerStatus(id, "stopped", { installed: null, message: `${id} is stopped.` });
@@ -146,6 +152,7 @@ function createManagedCliProvider({
           knownEndpoint,
           readyPattern,
           endpointPredicate,
+          authFailurePattern,
         });
         if (ownedChild.exitCode !== null || ownedChild.killed || child !== ownedChild) {
           throw new ProviderError(id, "process_exited", `${id} process exited during startup.`);
@@ -155,6 +162,7 @@ function createManagedCliProvider({
           endpoint,
           stability,
           message,
+          pid: ownedChild.pid,
         });
         return current;
       } catch (error) {
@@ -277,7 +285,9 @@ export function createNgrokProvider(dependencies) {
     command: "ngrok",
     versionArgs: ["version"],
     args: ["http", String(LOCAL_PORT), "--log", "stdout", "--log-format", "json"],
-    requiredSecret: "NGROK_AUTHTOKEN",
+    // O agente ngrok pode estar autenticado pelo proprio config (~/.config/ngrok/ngrok.yml);
+    // o token do app e opcional. Falhas de autenticacao sao detectadas na saida.
+    authFailurePattern: /authtoken|authentication required/i,
     stability: "session",
     message: "ngrok is publishing the JanjaNode endpoint.",
   });

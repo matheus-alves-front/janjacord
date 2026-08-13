@@ -184,6 +184,7 @@ export function providerStatus(provider, state, values = {}) {
     message: values.message ?? null,
   };
   if (values.nginxConfig !== undefined) status.nginxConfig = values.nginxConfig;
+  if (Number.isInteger(values.pid) && values.pid > 1) status.pid = values.pid;
   return Object.freeze(status);
 }
 

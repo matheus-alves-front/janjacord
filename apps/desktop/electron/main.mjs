@@ -66,10 +66,12 @@ import {
 import {
   buildEnvelope,
   parseInviteV3,
+  parseInviteV4,
   verifySignedBridgeDescriptor,
   verifySignedHostGrantRevocation,
 } from "@janjacord/protocol";
 import * as mls from "@janjacord/crypto-core";
+import { execFileSync } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -615,6 +617,94 @@ function publicProviderRoute(provider, status) {
     detail: status.message || "Rota WSS pronta. Voz e vídeo continuam em conexão direta sem TURN.",
   };
 }
+
+// ---------------------------------------------------------------- lifecycle de providers
+const PROVIDER_PROCESS_MARKERS = Object.freeze({
+  ngrok: ["ngrok"],
+  cloudflare: ["cloudflared"],
+  tailscale: ["tailscale"],
+});
+
+function providerProcessNameMatches(pid, provider) {
+  const names = PROVIDER_PROCESS_MARKERS[provider];
+  if (!names) return false;
+  try {
+    if (process.platform === "linux") {
+      const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+      return cmdline.some((part) => names.some((name) => part.toLowerCase().includes(name)));
+    }
+    if (process.platform === "win32") {
+      const output = execFileSync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], {
+        encoding: "utf8",
+        timeout: 5_000,
+        windowsHide: true,
+      });
+      return names.some((name) => output.toLowerCase().includes(name));
+    }
+    if (process.platform === "darwin") {
+      const output = execFileSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8", timeout: 5_000 });
+      return names.some((name) => output.toLowerCase().includes(name));
+    }
+  } catch {
+    // processo já encerrado ou sem permissão de leitura — tratado como não-casamento
+  }
+  return false;
+}
+
+async function terminateByPid(pid) {
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return false;
+  }
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // já encerrou entre o loop e o kill
+  }
+  return true;
+}
+
+async function stopActiveProviderRoute() {
+  const current = readConnectivityConfig();
+  const runtimeId = runningProviderId ?? runtimeProviderId(current.activeRoute?.provider, current.providerSettings?.mode);
+  const persistedPid = current.activeRoute?.pid;
+  if (runtimeId) await connectivityProviders.stop(runtimeId).catch(() => {});
+  runningProviderId = null;
+  // órfão de uma sessão anterior (ex.: encerramento forçado): o child do registry não existe,
+  // mas o túnel pode continuar público — encerra pelo PID persistido com verificação de identidade.
+  if (Number.isInteger(persistedPid) && persistedPid > 1 && providerProcessNameMatches(persistedPid, current.activeRoute?.provider)) {
+    await terminateByPid(persistedPid);
+  }
+  return applyConnectivityConfigAndReconfigure({ ...current, activeRoute: null, providerSettings: null });
+}
+
+function stopProvidersOnQuit() {
+  try {
+    const current = readConnectivityConfig();
+    const runtimeId = runningProviderId ?? runtimeProviderId(current.activeRoute?.provider, current.providerSettings?.mode);
+    if (runtimeId) connectivityProviders.stop(runtimeId).catch(() => {});
+    runningProviderId = null;
+    const persistedPid = current.activeRoute?.pid;
+    if (Number.isInteger(persistedPid) && persistedPid > 1 && providerProcessNameMatches(persistedPid, current.activeRoute?.provider)) {
+      try {
+        process.kill(persistedPid, "SIGTERM");
+      } catch {
+        // já encerrou
+      }
+    }
+  } catch (error) {
+    console.error("[desktop] parada best-effort do provider no quit falhou:", error?.message ?? error);
+  }
+}
 function janjanodeMainPath() {
   return app.isPackaged
     ? require.resolve("@janjacord/janjanode")
@@ -713,12 +803,13 @@ function initLocalDb() {
 function janjaNodeDirectRouteHints(config) {
   const route = config?.activeRoute;
   if (!route || route.status === "error" || (route.expiresAt && route.expiresAt <= Date.now())) return [];
+  // Shape estrita do DirectRouteHintConfigSchema (schemas): provider/endpoint/stable/expiresAt,
+  // sem startedAt. Rotas estaveis sem expiracao usam o horizonte padrao de invite (30 dias).
   return [{
     provider: route.provider,
     endpoint: route.endpoint,
     stable: route.stable,
-    startedAt: route.startedAt,
-    ...(route.expiresAt ? { expiresAt: route.expiresAt } : {}),
+    expiresAt: route.expiresAt ?? Date.now() + 30 * 24 * 3600_000,
   }];
 }
 
@@ -1699,23 +1790,54 @@ function registerIpc() {
     expectedHostFingerprint,
   }) => {
     if (!identity) return { ok: false, error: { code: "unauthorized", message: "identity required" } };
-    // descoberta via rendezvous quando possível (invite carrega serverId)
-    const parsedV3 = parseInviteV3(inviteKey);
-    const parsed = parsedV3 ? { serverId: parsedV3.payload.serverId } : parseInviteKey(inviteKey);
+    // JC4 (rotas WSS assinadas) primeiro, depois JC3, depois JC2 legado — sem downgrade silencioso.
+    const parsedV4 = parseInviteV4(inviteKey);
+    const parsedV3 = parsedV4 ? null : parseInviteV3(inviteKey);
+    const parsed = parsedV4 ? { serverId: parsedV4.payload.serverId }
+      : parsedV3 ? { serverId: parsedV3.payload.serverId }
+      : parseInviteKey(inviteKey);
     if (!parsed) return { ok: false, error: { code: "invalid_invite", message: "invite inválido" } };
+    const isLegacy = !parsedV4 && !parsedV3;
+    const inviteAuthorityFingerprint = parsedV4?.payload.authorityFingerprint ?? parsedV3?.payload.authorityFingerprint;
+    const inviteSecret = parsedV4?.payload.inviteSecret ?? parsedV3?.payload.inviteSecret;
     // convite autocontido (JC2): o endpoint do host viaja no convite — um campo só
-    let target = hostUrl || (parsed?.endpoint ? `ws://${parsed.endpoint}/signal` : "");
-    const bridgeEndpoints = parsedV3?.payload.bridgeHints.flatMap((hint) => hint.payload.endpoints) ?? [];
+    let target = isLegacy ? (hostUrl || (parsed?.endpoint ? `ws://${parsed.endpoint}/signal` : "")) : hostUrl || "";
+    const bridgeEndpoints = (parsedV4?.payload.bridgeHints ?? parsedV3?.payload.bridgeHints ?? [])
+      .flatMap((hint) => hint.payload.endpoints);
     const rendezvousUrls = [...new Set([
       ...(process.env.JC_RENDEZVOUS_URL ? [process.env.JC_RENDEZVOUS_URL] : []),
       ...bridgeEndpoints.filter((endpoint) => endpoint.startsWith("wss://") && endpoint.includes("/rendezvous")),
     ].map(bridgeWebSocketEndpoint))];
-    if (parsedV3 && rendezvousUrls.length > 0) {
+
+    // JC4: rotas diretas WSS primeiro, com a host key pinada (o challenge do host precisa
+    // provar exatamente a chave assinada no hint; HostClient falha fechado em mismatch).
+    if (parsedV4) {
+      for (const hint of parsedV4.payload.directRouteHints) {
+        const routeUrl = typeof hint.payload.endpoint === "string" ? hint.payload.endpoint : "";
+        if (!routeUrl.startsWith("wss://")) continue;
+        try {
+          const connected = await connectToHost(routeUrl, {
+            serverId: parsedV4.payload.serverId,
+            authorityFingerprint: parsedV4.payload.authorityFingerprint,
+            expectedHostPublicKey: hint.payload.hostPublicKey,
+            expectedHostId: hint.payload.hostId,
+          });
+          if (connected) {
+            target = null;
+            break;
+          }
+        } catch {
+          // tenta a próxima rota; todas as falhas caem no rendezvous de bridges
+        }
+      }
+    }
+
+    if ((parsedV4 || parsedV3) && rendezvousUrls.length > 0) {
       try {
         const results = await Promise.allSettled(rendezvousUrls.map((url) => resolveAtBridge(url, {
             type: "resolve",
             serverId: parsed.serverId,
-            authorityFingerprint: parsedV3.payload.authorityFingerprint,
+            authorityFingerprint: inviteAuthorityFingerprint,
         })));
         const resolved = results
           .filter((result) => result.status === "fulfilled" && result.value?.ok)
@@ -1727,14 +1849,14 @@ function registerIpc() {
           return { ok: false, error: { code: "unauthorized", message: "estado local de confiança anti-rollback inválido ou ausente" } };
         }
         const trustedServer = connectivity.authorityTrust.servers.find((entry) => (
-          entry.serverId === parsed.serverId && entry.authorityFingerprint === parsedV3.payload.authorityFingerprint
+          entry.serverId === parsed.serverId && entry.authorityFingerprint === inviteAuthorityFingerprint
         ));
         const verifiedRevocations = [...(trustedServer?.revocations ?? [])];
         for (const item of resolved.flatMap((data) => data?.revocations ?? [])) {
           const verified = verifySignedHostGrantRevocation(item?.revocation, item?.authorityPublicKey);
           if (!verified || verified.payload.serverId !== parsed.serverId) continue;
           try {
-            if (ed25519Fingerprint(Buffer.from(item.authorityPublicKey, "base64url")) !== parsedV3.payload.authorityFingerprint) continue;
+            if (ed25519Fingerprint(Buffer.from(item.authorityPublicKey, "base64url")) !== inviteAuthorityFingerprint) continue;
           } catch {
             continue;
           }
@@ -1761,7 +1883,7 @@ function registerIpc() {
           resolved.flatMap((data) => data?.records ?? data?.registrations ?? []),
           {
             serverId: parsed.serverId,
-            authorityFingerprint: parsedV3.payload.authorityFingerprint,
+            authorityFingerprint: inviteAuthorityFingerprint,
             highWater: connectivity.hostHighWater,
             verifiedRevokedGrantIds: revokedGrantIds,
             verifiedGenerationFloors: generationFloors,
@@ -1778,13 +1900,13 @@ function registerIpc() {
         const connected = await connectToIceHost({
           bridgeUrls: signalingUrls,
           serverId: parsed.serverId,
-          authorityFingerprint: parsedV3.payload.authorityFingerprint,
+          authorityFingerprint: inviteAuthorityFingerprint,
           hostId: selected.hostId,
           hostRegistration: selected.registration,
           iceServers: stunServers,
           networkPrivacy: "direct",
           inviteAccessHash: createHash("sha256")
-            .update(Buffer.from(parsedV3.payload.inviteSecret, "base64url"))
+            .update(Buffer.from(inviteSecret, "base64url"))
             .digest("hex"),
         });
         if (!connected) return { ok: false, error: { code: "host_offline", message: "conexão ICE não respondeu" } };
@@ -1792,11 +1914,11 @@ function registerIpc() {
           version: 1,
           servers: [
             ...connectivity.authorityTrust.servers.filter((entry) => !(
-              entry.serverId === parsed.serverId && entry.authorityFingerprint === parsedV3.payload.authorityFingerprint
+              entry.serverId === parsed.serverId && entry.authorityFingerprint === inviteAuthorityFingerprint
             )),
             {
               serverId: parsed.serverId,
-              authorityFingerprint: parsedV3.payload.authorityFingerprint,
+              authorityFingerprint: inviteAuthorityFingerprint,
               revocations: [...revocationsByGrant.values()],
             },
           ],
@@ -1806,10 +1928,10 @@ function registerIpc() {
       } catch (e) {
         return { ok: false, error: { code: "rendezvous", message: `falha no rendezvous: ${(e).message}` } };
       }
-    } else if (parsedV3) {
+    } else if (parsedV4 || parsedV3) {
       return { ok: false, error: { code: "rendezvous", message: "invite sem JanjaBridge alcançável" } };
     }
-    if (target) {
+    if (target && isLegacy) {
       const connectivity = readConnectivityConfig();
       const persistedPin = parsed?.serverId ? connectivity.legacyHostPins?.[parsed.serverId] : undefined;
       if (!parsedV3 && !persistedPin && allowLegacyTrust !== true) {
@@ -1938,7 +2060,7 @@ function registerIpc() {
   });
 
   ipcMain.handle("clipboard.clearIfEquals", (_e, { text }) => {
-    if (typeof text !== "string" || text.length > 16 * 1024 || !/^JC[23]-/.test(text)) {
+    if (typeof text !== "string" || text.length > 16 * 1024 || !/^JC[234]-/.test(text)) {
       return { ok: false, error: { code: "invalid_input", message: "invalid invite clipboard value" } };
     }
     const cleared = clipboard.readText() === text;
@@ -2120,6 +2242,7 @@ function registerIpc() {
           id,
           installed: id === "manual" ? true : detected.installed === true,
           ...(id === "ngrok" ? { authenticated: Boolean(secrets.ngrok) } : {}),
+          ...(id === "cloudflare" ? { authenticated: Boolean(secrets.cloudflare) } : {}),
           detail: detected.message || undefined,
         };
       }));
@@ -2146,9 +2269,6 @@ function registerIpc() {
       const secrets = readProviderSecrets();
       if (input.provider === "ngrok" && input.token) secrets.ngrok = input.token;
       if (input.provider === "cloudflare" && input.mode === "named" && input.token) secrets.cloudflare = input.token;
-      if (input.provider === "ngrok" && !secrets.ngrok) {
-        return { ok: false, error: { code: "auth_required", message: "Informe o authtoken do ngrok uma vez." } };
-      }
       if (input.provider === "cloudflare" && input.mode === "named" && !secrets.cloudflare) {
         return { ok: false, error: { code: "auth_required", message: "Informe o token do Cloudflare Tunnel." } };
       }
@@ -2157,7 +2277,7 @@ function registerIpc() {
       }
 
       const options = input.provider === "ngrok"
-        ? { env: { NGROK_AUTHTOKEN: secrets.ngrok }, startupTimeoutMs: 45_000 }
+        ? { env: (secrets.ngrok ? { NGROK_AUTHTOKEN: secrets.ngrok } : {}), startupTimeoutMs: 45_000 }
         : input.provider === "cloudflare" && input.mode === "named"
           ? { env: { TUNNEL_TOKEN: secrets.cloudflare }, endpoint: `wss://${input.domain}/`, startupTimeoutMs: 45_000 }
           : input.provider === "cloudflare"
@@ -2191,7 +2311,7 @@ function registerIpc() {
       const current = readConnectivityConfig();
       const next = {
         ...current,
-        activeRoute: route,
+        activeRoute: { ...route, ...(Number.isInteger(started.pid) && started.pid > 1 ? { pid: started.pid } : {}) },
         providerSettings: { provider: input.provider, mode: input.mode, ...(input.domain ? { domain: input.domain } : {}) },
       };
       const restartError = await applyConnectivityConfigAndReconfigure(next);
@@ -2214,11 +2334,7 @@ function registerIpc() {
   });
   ipcMain.handle("connectivity.provider.stop", async () => {
     try {
-      const current = readConnectivityConfig();
-      const runtimeId = runningProviderId ?? runtimeProviderId(current.activeRoute?.provider, current.providerSettings?.mode);
-      if (runtimeId) await connectivityProviders.stop(runtimeId).catch(() => {});
-      runningProviderId = null;
-      const restartError = await applyConnectivityConfigAndReconfigure({ ...current, activeRoute: null, providerSettings: null });
+      const restartError = await stopActiveProviderRoute();
       return {
         ok: true,
         data: {
@@ -3209,20 +3325,27 @@ async function runOperatorSmoke(win) {
     await pause(2_500);
     const createAndCopyInvite = async () => {
       await clickText("+ convite");
-      await waitFor(`document.body.innerText.includes('Convite de uso único')`, "invite");
+      await waitFor(`!!document.querySelector('.invite-share-token')`, "invite card");
+      for (let attempt = 0; attempt < 10 && !win.isFocused(); attempt += 1) {
+        win.show();
+        win.focus();
+        win.webContents.focus();
+        await pause(100);
+      }
       clipboard.clear();
       let copied = "";
-      for (let attempt = 0; attempt < 2 && !copied.startsWith("JC3-"); attempt += 1) {
+      for (let attempt = 0; attempt < 2 && !/^JC[34]-/.test(copied); attempt += 1) {
         await clickHumanText("Copiar convite");
         const clipboardDeadline = Date.now() + 5_000;
         while (Date.now() < clipboardDeadline) {
           copied = clipboard.readText().trim();
-          if (copied.startsWith("JC3-")) break;
+          if (/^JC[34]-/.test(copied)) break;
           await pause(50);
         }
       }
-      if (!copied.startsWith("JC3-") || !parseInviteV3(copied)) {
-        throw new Error("[operator-smoke:owner] Copy action did not place a complete JC3 invite on the Electron clipboard");
+      if (!/^JC[34]-/.test(copied) || !(parseInviteV4(copied) ?? parseInviteV3(copied))) {
+        const cardKey = await js(`(document.querySelector('.invite-share-token')?.getAttribute('title') ?? '').trim()`);
+        throw new Error(`[operator-smoke:owner] copy did not place a JC4/JC3 invite on the clipboard; card prefix ${cardKey.slice(0, 16)}`);
       }
       return copied;
     };
@@ -3676,6 +3799,7 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   appQuitting = true;
+  stopProvidersOnQuit();
   stopHost();
   stopReplicaHost();
   localDb?.close();

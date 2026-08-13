@@ -67,6 +67,9 @@ export const DirectWssEndpointSchema = z.string().min(1).max(2048).superRefine((
     if (url.username || url.password) {
       ctx.addIssue({ code: "custom", message: "direct route endpoint must not contain credentials" });
     }
+    if (url.search) {
+      ctx.addIssue({ code: "custom", message: "direct route endpoint must not contain a query string" });
+    }
     if (url.hash) {
       ctx.addIssue({ code: "custom", message: "direct route endpoint must not contain a fragment" });
     }

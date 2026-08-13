@@ -227,6 +227,25 @@ describe("connectivity schemas", () => {
       expiresAt: 3_000,
       token: "must-not-pass",
     }]).success).toBe(false);
+    // contrato do env JC_DIRECT_ROUTE_HINTS: expiresAt obrigatório e sem startedAt
+    expect(DirectRouteHintsConfigSchema.safeParse([{
+      provider: "manual",
+      endpoint: "wss://host.example.test/signal",
+      stable: true,
+    }]).success).toBe(false);
+    expect(DirectRouteHintsConfigSchema.safeParse([{
+      provider: "manual",
+      endpoint: "wss://host.example.test/signal",
+      stable: true,
+      expiresAt: 3_000,
+      startedAt: 1_000,
+    }]).success).toBe(false);
+    expect(DirectRouteHintsConfigSchema.safeParse([{
+      provider: "manual",
+      endpoint: "wss://host.example.test/signal?token=leak",
+      stable: true,
+      expiresAt: 3_000,
+    }]).success).toBe(false);
     expect(DirectRouteHintsConfigSchema.safeParse(Array.from({ length: 4 }, (_, index) => ({
       provider: "manual",
       endpoint: `wss://host-${index}.example.test/signal`,
