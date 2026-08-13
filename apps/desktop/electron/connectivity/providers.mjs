@@ -190,6 +190,20 @@ function createManagedCliProvider({
   });
 }
 
+function classifyTailscaleFailure(error) {
+  const combined = `${String(error?.message ?? "")}\n${String(error?.stdout ?? "")}\n${String(error?.stderr ?? "")}`;
+  if (/funnel is not enabled/i.test(combined)) {
+    return new ProviderError("tailscale-funnel", "tailscale_funnel_disabled", "Funnel is not enabled on the tailnet. Enable it at https://login.tailscale.com/f/funnel");
+  }
+  if (/NeedsLogin|logged out|unauthorized/i.test(combined)) {
+    return new ProviderError("tailscale-funnel", "tailscale_needs_login", "Tailscale requires login. Run 'tailscale up' or sign in from the Tailscale app.");
+  }
+  if (/not connected|node is offline|state\\?['\"]?:\\s*['\"]?offline|connection lost/i.test(combined)) {
+    return new ProviderError("tailscale-funnel", "tailscale_offline", "Tailscale is not connected on this machine.");
+  }
+  return null;
+}
+
 export function createTailscaleProvider({ id, runner, baseEnvironment }) {
   let active = false;
   let current = providerStatus(id, "stopped", { installed: null, message: "Tailscale Funnel is stopped." });
@@ -231,7 +245,7 @@ export function createTailscaleProvider({ id, runner, baseEnvironment }) {
         }
         active = false;
         current = providerStatus(id, "error", { installed: null, message: "Tailscale Funnel failed to start." });
-        throw sanitizedProviderError(id, error);
+        throw classifyTailscaleFailure(error) ?? sanitizedProviderError(id, error);
       }
     },
     async status(options = {}) {

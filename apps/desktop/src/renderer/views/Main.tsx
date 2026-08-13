@@ -25,6 +25,7 @@ import { CallView } from "./CallView";
 import { BridgePairingDialog } from "./BridgePairingDialog";
 import { ServerSettings } from "./ServerSettings";
 import { SetupProgress, type SetupStepId, type SetupStepState, type SetupStepStatus } from "./SetupProgress";
+import type { ConnectivityRoute } from "../App";
 import type { CallSignal } from "../webrtc";
 import { friendlyIpcError, legacyFingerprint, rejectedIpcError, type IpcError } from "../ipcErrors";
 import { attachmentSizeIsAllowed, encodeAttachmentBytes } from "../attachmentEncoding";
@@ -95,6 +96,8 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
   const [setupFocusRequest, setSetupFocusRequest] = useState(0);
   const [pendingServer, setPendingServer] = useState<ServerState | null>(null);
   const [bridgeCount, setBridgeCount] = useState<number | null>(null);
+  const [activeRoute, setActiveRoute] = useState<ConnectivityRoute | null>(null);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<"members" | "connectivity">("members");
   const [legacyChallenge, setLegacyChallenge] = useState<{ invite: string; fingerprint: string } | null>(null);
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteNotice, setInviteNotice] = useState<string | null>(null);
@@ -319,6 +322,7 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
         return;
       }
       setBridgeCount(result.data.bridges.length);
+      setActiveRoute(result.data.activeRoute ?? null);
       setConnectivityState("ready");
     } catch (error) {
       setBridgeCount(null);
@@ -712,6 +716,26 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
               {activeAction === "invite" ? "criando..." : "+ convite"}
             </button>
           </div>
+          {activeRoute && (
+            <button
+              className="mt-2 flex w-full items-center gap-1.5 rounded-md border border-emerald-900/70 bg-zinc-950/60 px-2 py-1.5 text-left"
+              title={`Rota externa ativa · ${activeRoute.endpoint} · ${activeRoute.media === "turn" ? "mídia via TURN" : "mídia direta"}`}
+              aria-label="Rota externa ativa — abrir conectividade"
+              data-smoke-critical="active-route-badge"
+              onClick={() => { setSettingsInitialTab("connectivity"); setShowSettings(true); }}
+            >
+              <span className="relative flex h-2 w-2 shrink-0">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" aria-hidden />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" aria-hidden />
+              </span>
+              <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-emerald-200">
+                {activeRoute.provider === "tailscale" ? "Tailscale" : activeRoute.provider === "ngrok" ? "ngrok" : activeRoute.provider === "cloudflare" ? "Cloudflare" : "Nginx"} · rota ativa
+              </span>
+              <span className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-medium uppercase tracking-wide ${activeRoute.media === "turn" ? "bg-emerald-900/60 text-emerald-200" : "bg-amber-900/50 text-amber-200"}`}>
+                {activeRoute.media === "turn" ? "TURN" : "direta"}
+              </span>
+            </button>
+          )}
           {inviteKey && (
             <div className="invite-share-card mt-2 rounded-md border border-emerald-900/70 bg-zinc-950 p-2.5" role="region" aria-label="Convite de uso único">
               <div className="flex items-center justify-between gap-2">
@@ -765,9 +789,12 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
       {showSettings && server && (
         <ServerSettings
           server={server}
+          initialTab={settingsInitialTab}
           onClose={() => {
             setShowSettings(false);
+            setSettingsInitialTab("members");
             refreshState();
+            void loadConnectivity();
           }}
         />
       )}

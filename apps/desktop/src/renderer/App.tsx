@@ -14,7 +14,9 @@ interface WindowApi {
   identityRestore: (recoveryKey: string, nickname: string, newPassword: string) => Promise<{ ok: boolean; error?: { message: string } }>;
   serverCreate: () => Promise<{ ok: boolean; data?: unknown; connectivity?: { bridgeReady: boolean; needsBridge: boolean }; error?: { code?: string; message: string } }>;
   serverJoin: (hostUrl: string, inviteKey: string, allowLegacyTrust?: boolean) => Promise<{ ok: boolean; data?: unknown; error?: IpcError }>;
-  connectivityStatus: () => Promise<{ ok: boolean; data?: { bridges: { bridgeId: string; endpoint: string; expiresAt: number }[]; activeRoute?: ConnectivityRoute | null; backgroundHosting: boolean }; error?: IpcError }>;
+  connectivityStatus: () => Promise<{ ok: boolean; data?: { bridges: { bridgeId: string; endpoint: string; expiresAt: number }[]; activeRoute?: ConnectivityRoute | null; backgroundHosting: boolean; turn?: { configured: boolean; provider: string } }; error?: IpcError }>;
+  connectivityTurnSet: (keyId: string, apiToken: string) => Promise<{ ok: boolean; data?: { configured: boolean; provider: string }; error?: IpcError }>;
+  connectivityTurnClear: () => Promise<{ ok: boolean; data?: { configured: boolean }; error?: IpcError }>;
   connectivityProviders: () => Promise<{ ok: boolean; data?: { providers: ConnectivityProvider[]; activeRoute?: ConnectivityRoute | null }; error?: IpcError }>;
   connectivityProviderStart: (provider: ConnectivityProviderId, config: Record<string, string | boolean>) => Promise<{ ok: boolean; data?: ConnectivityRoute; error?: IpcError }>;
   connectivityProviderStop: () => Promise<{ ok: boolean; data?: { stopped: boolean }; error?: IpcError }>;

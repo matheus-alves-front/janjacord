@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { HardDrive, Link2, LoaderCircle, Network, Plus, RefreshCw, ShieldCheck, Trash2, X } from "lucide-react";
+import { HardDrive, KeyRound, Link2, LoaderCircle, Network, Plus, RefreshCw, ShieldCheck, Trash2, X } from "lucide-react";
 import { BridgePairingDialog } from "./BridgePairingDialog";
-import { ConnectivityWizard } from "./ConnectivityWizard";
+import { ConnectivityWizard, sanitizeEndpoint } from "./ConnectivityWizard";
+import type { ConnectivityRoute } from "../App";
 import { friendlyIpcError, rejectedIpcError } from "../ipcErrors";
 
 interface Member {
@@ -90,8 +91,8 @@ const TABS: [Tab, string][] = [
   ["invites", "Convites"],
 ];
 
-export function ServerSettings({ server, onClose }: { server: ServerState; onClose: () => void }) {
-  const [tab, setTab] = useState<Tab>("members");
+export function ServerSettings({ server, onClose, initialTab = "members" }: { server: ServerState; onClose: () => void; initialTab?: Tab }) {
+  const [tab, setTab] = useState<Tab>(initialTab);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [invites, setInvites] = useState<{ id: string; used: number; max_uses: number; revoked: number }[]>([]);
@@ -106,6 +107,12 @@ export function ServerSettings({ server, onClose }: { server: ServerState; onClo
   const [showConnectivityWizard, setShowConnectivityWizard] = useState(false);
   const [bridges, setBridges] = useState<{ bridgeId: string; endpoint: string; expiresAt: number }[]>([]);
   const [backgroundHosting, setBackgroundHosting] = useState(false);
+  const [activeRoute, setActiveRoute] = useState<ConnectivityRoute | null>(null);
+  const [turnConfigured, setTurnConfigured] = useState(false);
+  const [turnBusy, setTurnBusy] = useState(false);
+  const [turnError, setTurnError] = useState<string | null>(null);
+  const [turnKeyId, setTurnKeyId] = useState("");
+  const [turnApiToken, setTurnApiToken] = useState("");
   const [hostGrants, setHostGrants] = useState<HostGrant[]>(server.hostGrants ?? []);
   const [hostCandidates, setHostCandidates] = useState<HostCandidate[]>(server.hostCandidates ?? []);
   const [hosting, setHosting] = useState(server.hosting);
@@ -167,12 +174,68 @@ export function ServerSettings({ server, onClose }: { server: ServerState; onClo
       }
       setBridges(result.data.bridges);
       setBackgroundHosting(result.data.backgroundHosting);
+      setActiveRoute(result.data.activeRoute ?? null);
+      setTurnConfigured(result.data.turn?.configured === true);
       setConnectivityLoadState("ready");
     } catch (error) {
       setConnectivityLoadError(rejectedIpcError(error, "Não foi possível carregar as rotas configuradas."));
       setConnectivityLoadState("error");
     }
   };
+  const saveTurn = async () => {
+    setTurnBusy(true);
+    setTurnError(null);
+    try {
+      const result = await window.janjacord.connectivityTurnSet(turnKeyId, turnApiToken);
+      if (!result.ok || !result.data) {
+        setTurnError(friendlyIpcError(result.error, "Não foi possível validar o TURN da Cloudflare."));
+        return;
+      }
+      setTurnConfigured(result.data.configured);
+      setTurnKeyId("");
+      setTurnApiToken("");
+      await loadConnectivity();
+    } catch (error) {
+      setTurnError(rejectedIpcError(error, "Não foi possível validar o TURN da Cloudflare."));
+    } finally {
+      setTurnBusy(false);
+    }
+  };
+
+  const clearTurn = async () => {
+    setTurnBusy(true);
+    setTurnError(null);
+    try {
+      const result = await window.janjacord.connectivityTurnClear();
+      if (!result.ok) {
+        setTurnError(friendlyIpcError(result.error, "Não foi possível remover o TURN."));
+        return;
+      }
+      setTurnConfigured(false);
+      await loadConnectivity();
+    } catch (error) {
+      setTurnError(rejectedIpcError(error, "Não foi possível remover o TURN."));
+    } finally {
+      setTurnBusy(false);
+    }
+  };
+
+  const stopActiveRoute = async () => {
+    setConnectivityLoadState("loading");
+    try {
+      const result = await window.janjacord.connectivityProviderStop();
+      if (!result.ok) {
+        setConnectivityLoadError(friendlyIpcError(result.error, "Não foi possível desligar a rota."));
+        setConnectivityLoadState("error");
+        return;
+      }
+      await loadConnectivity();
+    } catch (error) {
+      setConnectivityLoadError(rejectedIpcError(error, "Não foi possível desligar a rota."));
+      setConnectivityLoadState("error");
+    }
+  };
+
   const loadHosts = async (): Promise<boolean> => {
     setHostsState("loading");
     setHostsError(null);
@@ -670,6 +733,98 @@ export function ServerSettings({ server, onClose }: { server: ServerState; onClo
                 >
                   Configurar conexão
                 </button>
+              </div>
+              {activeRoute && (
+                <div className="settings-row flex items-start justify-between gap-4 border-b border-zinc-800 pb-4">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-emerald-400" aria-hidden />
+                      <p className="text-sm font-medium text-zinc-200">Rota externa ativa</p>
+                      <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${activeRoute.media === "turn" ? "bg-emerald-900/60 text-emerald-200" : "bg-amber-900/50 text-amber-200"}`}>
+                        {activeRoute.media === "turn" ? "mídia via TURN" : "mídia direta"}
+                      </span>
+                    </div>
+                    <p className="mt-1 break-all text-xs leading-5 text-zinc-400">{sanitizeEndpoint(activeRoute.endpoint)}</p>
+                    <p className="mt-0.5 text-[11px] text-zinc-500">{activeRoute.stable ? "Endereço estável" : "Endereço pode mudar"} · convites novos carregam esta rota.</p>
+                  </div>
+                  <button
+                    className="shrink-0 rounded-md border border-red-900/80 px-3 py-2 text-xs text-red-300 hover:bg-red-950/40 disabled:opacity-40"
+                    onClick={() => void stopActiveRoute()}
+                    disabled={!isOwner || connectivityLoadState === "loading"}
+                  >
+                    Desligar rota
+                  </button>
+                </div>
+              )}
+              <div className="settings-row border-b border-zinc-800 pb-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <KeyRound className="h-4 w-4 shrink-0 text-sky-400" aria-hidden />
+                      <p className="text-sm font-medium text-zinc-200">Voz e vídeo: TURN gratuito</p>
+                    </div>
+                    <p className="mt-1 text-xs leading-5 text-zinc-400">
+                      Sem VPS: o relay da Cloudflare (turn.cloudflare.com) faz voz/vídeo atravessarem NAT restritivo quando a conexão direta falhar.
+                      Configure uma vez em <span className="text-zinc-300">dash.cloudflare.com → Calls → TURN</span> e cole TURN Key ID + API token.
+                    </p>
+                    {turnConfigured ? (
+                      <p className="mt-2 flex items-center gap-1.5 text-xs text-emerald-300">
+                        <ShieldCheck className="h-3.5 w-3.5" aria-hidden />
+                        TURN Cloudflare configurado — mídia pode usar relay.
+                      </p>
+                    ) : (
+                      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                        <label className="text-xs font-medium text-zinc-300" htmlFor="connectivity-turn-keyid">
+                          TURN Key ID
+                          <input
+                            id="connectivity-turn-keyid"
+                            type="text"
+                            autoCapitalize="none"
+                            autoComplete="off"
+                            spellCheck={false}
+                            className="mt-2 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-sky-500"
+                            value={turnKeyId}
+                            onChange={(event) => { setTurnKeyId(event.target.value); setTurnError(null); }}
+                            placeholder="abc123..."
+                          />
+                        </label>
+                        <label className="text-xs font-medium text-zinc-300" htmlFor="connectivity-turn-token">
+                          API token
+                          <input
+                            id="connectivity-turn-token"
+                            type="password"
+                            autoComplete="off"
+                            spellCheck={false}
+                            className="mt-2 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-sky-500"
+                            value={turnApiToken}
+                            onChange={(event) => { setTurnApiToken(event.target.value); setTurnError(null); }}
+                            placeholder="não será exibido depois"
+                          />
+                        </label>
+                      </div>
+                    )}
+                    {turnError && (
+                      <p className="mt-2 text-xs leading-5 text-red-400" role="alert">{turnError}</p>
+                    )}
+                  </div>
+                  {turnConfigured ? (
+                    <button
+                      className="shrink-0 rounded-md border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+                      onClick={() => void clearTurn()}
+                      disabled={turnBusy}
+                    >
+                      {turnBusy ? "Removendo..." : "Remover"}
+                    </button>
+                  ) : (
+                    <button
+                      className="shrink-0 rounded-md bg-sky-600 px-3 py-2 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+                      onClick={() => void saveTurn()}
+                      disabled={turnBusy || !turnKeyId.trim() || !turnApiToken.trim()}
+                    >
+                      {turnBusy ? "Validando..." : "Salvar e validar"}
+                    </button>
+                  )}
+                </div>
               </div>
               <div>
                 <div className="flex items-center justify-between">

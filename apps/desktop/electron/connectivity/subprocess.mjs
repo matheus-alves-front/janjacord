@@ -4,13 +4,15 @@ const MAX_COMMAND_TIMEOUT_MS = 60_000;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 
 export class SubprocessError extends Error {
-  constructor(code, command, exitCode = null) {
+  constructor(code, command, exitCode = null, output = {}) {
     const suffix = Number.isInteger(exitCode) ? ` (exit ${exitCode})` : "";
     super(`Connectivity command '${command}' failed${suffix}.`);
     this.name = "SubprocessError";
     this.code = code;
     this.command = command;
     this.exitCode = Number.isInteger(exitCode) ? exitCode : null;
+    this.stdout = output.stdout ?? "";
+    this.stderr = output.stderr ?? "";
   }
 }
 
@@ -79,7 +81,10 @@ export function createSubprocessRunner({ spawn, execFile } = {}) {
         callback(value);
       };
       const fail = finish((error) => {
-        reject(new SubprocessError(safeFailureCode(error), command, error?.code === "ETIMEDOUT" ? null : error?.code));
+        reject(new SubprocessError(safeFailureCode(error), command, error?.code === "ETIMEDOUT" ? null : error?.code, {
+          stdout: String(error?.subprocessStdout ?? ""),
+          stderr: String(error?.subprocessStderr ?? ""),
+        }));
       });
       const succeed = finish(resolve);
 
@@ -93,7 +98,7 @@ export function createSubprocessRunner({ spawn, execFile } = {}) {
           encoding: "utf8",
         }, (error, stdout = "", stderr = "") => {
           if (error) {
-            fail(error);
+            fail(Object.assign(error, { subprocessStdout: String(stdout).slice(0, MAX_OUTPUT_BYTES), subprocessStderr: String(stderr).slice(0, MAX_OUTPUT_BYTES) }));
             return;
           }
           succeed({ stdout: String(stdout), stderr: String(stderr), exitCode: 0 });
@@ -135,7 +140,10 @@ export function createSubprocessRunner({ spawn, execFile } = {}) {
       child.once("error", (error) => finish(reject, new SubprocessError(safeFailureCode(error), command)));
       child.once("exit", (code) => {
         if (code !== 0) {
-          finish(reject, new SubprocessError("command_failed", command, code));
+          finish(reject, new SubprocessError("command_failed", command, code, {
+            stdout: Buffer.concat(stdout).toString("utf8").slice(0, MAX_OUTPUT_BYTES),
+            stderr: Buffer.concat(stderr).toString("utf8").slice(0, MAX_OUTPUT_BYTES),
+          }));
           return;
         }
         finish(resolve, {

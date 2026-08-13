@@ -12,6 +12,7 @@ import {
   LoaderCircle,
   Network,
   OctagonX,
+  Radio,
   RadioTower,
   RefreshCw,
   ShieldAlert,
@@ -57,6 +58,12 @@ const CONNECTIVITY_ERRORS: Record<string, string> = {
   not_installed: "O agente deste provedor não está instalado. Instale-o e execute a detecção novamente.",
   provider_auth_required: "O provedor precisa de autenticação. Entre na conta ou informe um novo token.",
   auth_required: "O provedor precisa de autenticação. Entre na conta ou informe um novo token.",
+  tailscale_funnel_disabled: "O Funnel não está habilitado na sua conta Tailscale. Habilite em https://login.tailscale.com/f/funnel e tente novamente.",
+  tailscale_needs_login: "Entre no Tailscale (app ou `tailscale up`) antes de ativar o Funnel.",
+  tailscale_offline: "O Tailscale não está conectado nesta máquina. Conecte-se e tente novamente.",
+  turn_auth_failed: "As credenciais do TURN da Cloudflare foram rejeitadas. Confira TURN Key ID e API token.",
+  turn_unreachable: "Não foi possível falar com o TURN da Cloudflare. Verifique a rede e tente novamente.",
+  turn_mint_failed: "O TURN da Cloudflare não retornou servidores utilizáveis. Tente novamente mais tarde.",
   quota: "A cota da conta foi atingida. Aguarde a renovação ou escolha outro provedor.",
   quota_exceeded: "A cota da conta foi atingida. Aguarde a renovação ou escolha outro provedor.",
   expired: "A rota ou credencial expirou. Revise a configuração e ative uma nova rota.",
@@ -664,6 +671,15 @@ export function ConnectivityWizard({
                 </div>
               </div>
               {route.detail && <p className="mt-3 text-xs leading-5 text-zinc-300">{route.detail}</p>}
+              {route.media === "turn" && (
+                <div className="mt-4 flex items-start gap-3 border-y border-emerald-900/60 py-3 text-emerald-100">
+                  <Radio className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" aria-hidden />
+                  <div>
+                    <p className="text-xs font-medium">Mídia via TURN</p>
+                    <p className="mt-0.5 text-xs leading-5 text-emerald-200/80">Voz e vídeo podem passar por relay (TURN Cloudflare) quando a conexão direta falhar — funciona até atrás de NAT restritivo.</p>
+                  </div>
+                </div>
+              )}
               {route.media === "direct-only" && (
                 <div className="mt-4 flex items-start gap-3 border-y border-amber-900/60 py-3 text-amber-100">
                   <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" aria-hidden />

@@ -36,6 +36,8 @@ contextBridge.exposeInMainWorld("janjacord", {
   serverCreate: () => ipcRenderer.invoke("server.create"),
   serverJoin,
   connectivityStatus: () => ipcRenderer.invoke("connectivity.status"),
+  connectivityTurnSet: (keyId, apiToken) => ipcRenderer.invoke("connectivity.turn.set", { keyId, apiToken }),
+  connectivityTurnClear: () => ipcRenderer.invoke("connectivity.turn.clear"),
   connectivityProviders: () => ipcRenderer.invoke("connectivity.providers"),
   connectivityProviderStart: (provider, config) => ipcRenderer.invoke("connectivity.provider.start", { provider, config }),
   connectivityProviderStop: () => ipcRenderer.invoke("connectivity.provider.stop"),

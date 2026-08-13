@@ -36,6 +36,11 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, generateKeyPa
 import { durableAtomicWrite, ensureEncryptedDatabaseKey } from "./primary-host-profile.mjs";
 import { createProviderRegistry, PROVIDER_IDS } from "./connectivity/index.mjs";
 import {
+  mintCloudflareTurnIceServers,
+  TurnError,
+  validateCloudflareTurnConfig,
+} from "./connectivity/cloudflare-turn.mjs";
+import {
   decodeRendererAttachment,
   decryptDownloadedAttachment,
   encryptAttachmentForUpload,
@@ -421,22 +426,45 @@ function parsePersistedProviderSettings(value, provider) {
   return { provider, mode, ...(domain ? { domain } : {}) };
 }
 
+function normalizeStoredSecret(key, secret) {
+  if (["ngrok", "cloudflare"].includes(key)) {
+    return typeof secret === "string" && secret.length >= 8 && secret.length <= 4096 ? secret : undefined;
+  }
+  if (key === "cloudflareTurn") {
+    if (!secret || typeof secret !== "object") return undefined;
+    const keyId = typeof secret.keyId === "string" ? secret.keyId.trim() : "";
+    const apiToken = typeof secret.apiToken === "string" ? secret.apiToken.trim() : "";
+    try {
+      validateCloudflareTurnConfig(keyId, apiToken);
+    } catch {
+      return undefined;
+    }
+    return { keyId, apiToken };
+  }
+  return undefined;
+}
+
 function readProviderSecrets() {
   const file = connectivityProviderSecretsPath();
   if (!existsSync(file)) return {};
   if (!safeStorageUsable()) throw new Error("o cofre seguro do sistema operacional não está disponível");
   const parsed = JSON.parse(safeStorage.decryptString(readFileSync(file)));
   if (!parsed || parsed.version !== 1 || typeof parsed.values !== "object") throw new Error("provider secret store inválido");
-  return Object.fromEntries(Object.entries(parsed.values).filter(([key, secret]) => (
-    ["ngrok", "cloudflare"].includes(key) && typeof secret === "string" && secret.length >= 8 && secret.length <= 4096
-  )));
+  const values = {};
+  for (const [key, secret] of Object.entries(parsed.values)) {
+    const normalized = normalizeStoredSecret(key, secret);
+    if (normalized !== undefined) values[key] = normalized;
+  }
+  return values;
 }
 
 function writeProviderSecrets(values) {
   if (!safeStorageUsable()) throw new Error("o cofre seguro do sistema operacional não está disponível");
-  const filtered = Object.fromEntries(Object.entries(values).filter(([key, secret]) => (
-    ["ngrok", "cloudflare"].includes(key) && typeof secret === "string" && secret.length >= 8 && secret.length <= 4096
-  )));
+  const filtered = {};
+  for (const [key, secret] of Object.entries(values)) {
+    const normalized = normalizeStoredSecret(key, secret);
+    if (normalized !== undefined) filtered[key] = normalized;
+  }
   const encrypted = safeStorage.encryptString(JSON.stringify({ version: 1, values: filtered }));
   mkdirSync(userData(), { recursive: true });
   writePrivateAtomic(connectivityProviderSecretsPath(), encrypted);
@@ -610,12 +638,52 @@ function publicProviderRoute(provider, status) {
     provider,
     endpoint,
     status: temporary ? "limited" : "ready",
-    media: "direct-only",
+    media: turnConfigured() ? "turn" : "direct-only",
     stable: ["account", "operator"].includes(status.stability),
     startedAt: Date.now(),
     ...(temporary ? { expiresAt: Date.now() + 8 * 3600_000 } : {}),
     detail: status.message || "Rota WSS pronta. Voz e vídeo continuam em conexão direta sem TURN.",
   };
+}
+
+function turnConfigured() {
+  try {
+    return Boolean(readProviderSecrets().cloudflareTurn);
+  } catch {
+    return false;
+  }
+}
+
+let cloudflareTurnCache = null;
+
+async function cloudflareTurnIceServers(force = false) {
+  const secrets = readProviderSecrets();
+  const config = secrets.cloudflareTurn;
+  if (!config) return null;
+  const cached = cloudflareTurnCache;
+  const fresh = cached && !force && Date.now() < cached.mintedAt + (cached.ttl - 300) * 1000;
+  if (fresh) return cached;
+  const minted = await mintCloudflareTurnIceServers({ keyId: config.keyId, apiToken: config.apiToken });
+  cloudflareTurnCache = minted;
+  return minted;
+}
+
+function cloudflareTurnMerge(baseIceServers, minted) {
+  const base = Array.isArray(baseIceServers) ? baseIceServers : [];
+  return [...minted.iceServers, ...base];
+}
+
+async function applyCloudflareTurnToIceConfig(data) {
+  if (!turnConfigured()) return data;
+  try {
+    const minted = await cloudflareTurnIceServers();
+    if (!minted) return data;
+    return { ...data, iceServers: cloudflareTurnMerge(data?.iceServers, minted) };
+  } catch (error) {
+    // falha transiente de mint não derruba a chamada; volta ao ICE base e loga
+    console.error(`[desktop] mint de TURN Cloudflare falhou (usando ICE base): ${error?.code ?? error?.message ?? error}`);
+    return data;
+  }
 }
 
 // ---------------------------------------------------------------- lifecycle de providers
@@ -2224,6 +2292,7 @@ function registerIpc() {
         bridges: config.bridges.map(bridgeSummary),
         activeRoute: config.activeRoute,
         backgroundHosting: config.backgroundHosting,
+        turn: { configured: turnConfigured(), provider: "cloudflare" },
       },
     };
   });
@@ -2347,15 +2416,51 @@ function registerIpc() {
     }
   });
   ipcMain.handle("connectivity.ice-config", async () => {
-    if (callIceConfiguration) return { ok: true, data: callIceConfiguration };
-    const issued = await sendCommand({ type: "connectivity.iceConfig" });
-    if (issued?.ok && issued.data?.iceServers) {
-      callIceConfiguration = issued.data;
-      return issued;
+    try {
+      let data = callIceConfiguration;
+      if (!data) {
+        const issued = await sendCommand({ type: "connectivity.iceConfig" });
+        if (issued?.ok === false) return issued;
+        if (!issued?.ok || !issued.data) {
+          return { ok: false, error: { code: "host_offline", message: "Nenhuma credencial ICE/TURN temporária está disponível" } };
+        }
+        data = issued.data;
+      }
+      const merged = await applyCloudflareTurnToIceConfig(data);
+      callIceConfiguration = merged;
+      return { ok: true, data: merged };
+    } catch (error) {
+      return { ok: false, error: { code: error?.code ?? "unavailable", message: String(error?.message ?? error) } };
     }
-    return issued?.ok === false
-      ? issued
-      : { ok: false, error: { code: "host_offline", message: "Nenhuma credencial ICE/TURN temporária está disponível" } };
+  });
+  ipcMain.handle("connectivity.turn.set", async (_e, { keyId, apiToken }) => {
+    try {
+      const key = typeof keyId === "string" ? keyId.trim() : "";
+      const token = typeof apiToken === "string" ? apiToken.trim() : "";
+      validateCloudflareTurnConfig(key, token);
+      // valida as credenciais mintando uma vez antes de persistir
+      const minted = await mintCloudflareTurnIceServers({ keyId: key, apiToken: token });
+      cloudflareTurnCache = minted;
+      const secrets = readProviderSecrets();
+      writeProviderSecrets({ ...secrets, cloudflareTurn: { keyId: key, apiToken: token } });
+      return { ok: true, data: { configured: true, provider: "cloudflare" } };
+    } catch (error) {
+      const code = error instanceof TurnError ? error.code : "unavailable";
+      return { ok: false, error: { code, message: String(error?.message ?? error) } };
+    }
+  });
+  ipcMain.handle("connectivity.turn.clear", async () => {
+    try {
+      const secrets = readProviderSecrets();
+      if (secrets.cloudflareTurn) {
+        const { cloudflareTurn: _removed, ...rest } = secrets;
+        writeProviderSecrets(rest);
+      }
+      cloudflareTurnCache = null;
+      return { ok: true, data: { configured: false } };
+    } catch (error) {
+      return { ok: false, error: { code: "unavailable", message: String(error?.message ?? error) } };
+    }
   });
   ipcMain.handle("connectivity.bridge.add", async (_e, { pairingCode }) => {
     try {
@@ -2621,7 +2726,15 @@ async function runUiSmoke(win) {
         if (!(element instanceof HTMLElement) || element.offsetParent === null) continue;
         const rect = element.getBoundingClientRect();
         const name = element.getAttribute('data-smoke-critical') || element.getAttribute('data-smoke-screen') || element.tagName.toLowerCase();
-        if (rect.left < -1 || rect.right > width + 1 || rect.top < -1 || rect.bottom > height + 1) {
+        let insideScrollable = false;
+        for (let ancestor = element.parentElement; ancestor && ancestor !== document.documentElement; ancestor = ancestor.parentElement) {
+          const overflowY = getComputedStyle(ancestor).overflowY;
+          if (overflowY === 'auto' || overflowY === 'scroll') {
+            insideScrollable = true;
+            break;
+          }
+        }
+        if (!insideScrollable && (rect.left < -1 || rect.right > width + 1 || rect.top < -1 || rect.bottom > height + 1)) {
           issues.push(name + ' clipped at ' + JSON.stringify({ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width, height }));
         }
         const style = getComputedStyle(element);
@@ -2635,11 +2748,23 @@ async function runUiSmoke(win) {
     console.log(`[smoke-ui] geometry OK ${label} @ ${await js(`window.innerWidth + 'x' + window.innerHeight`)}`);
   };
   let expectedViewport = { width: 640, height: 480 };
+  const waitForFocus = async (expression, label, timeoutMs = 8_000) => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      if (await js(`Boolean(${expression})`)) return;
+      await pause(80);
+    }
+    throw new Error(`[smoke-ui] timed out waiting for focus: ${label}`);
+  };
   const shot = async (name, selectors = []) => {
     win.unmaximize();
     win.setContentSize(expectedViewport.width, expectedViewport.height);
-    await pause(220);
-    const viewport = await js(`[window.innerWidth, window.innerHeight]`);
+    let viewport = await js(`[window.innerWidth, window.innerHeight]`);
+    for (let attempt = 0; attempt < 20 && (viewport[0] !== expectedViewport.width || viewport[1] !== expectedViewport.height); attempt += 1) {
+      win.setContentSize(expectedViewport.width, expectedViewport.height);
+      await pause(120);
+      viewport = await js(`[window.innerWidth, window.innerHeight]`);
+    }
     if (viewport[0] !== expectedViewport.width || viewport[1] !== expectedViewport.height) {
       throw new Error(`[smoke-ui] expected ${expectedViewport.width}x${expectedViewport.height} content viewport, got ${viewport.join("x")}`);
     }
@@ -2703,6 +2828,17 @@ async function runUiSmoke(win) {
       return true;
     })()`);
     if (!clicked) throw new Error(`[smoke-ui] button ${buttonText} not found for host grant ${grantId}`);
+  };
+  const clickScoped = async (scopeSelector, buttonText) => {
+    const clicked = await js(`(() => {
+      const root = document.querySelector(${JSON.stringify(scopeSelector)});
+      const button = root && [...root.querySelectorAll('button')].find((item) => item.offsetParent !== null && !item.disabled && item.textContent.trim() === ${JSON.stringify(buttonText)});
+      if (!button) return false;
+      button.focus();
+      button.click();
+      return true;
+    })()`);
+    if (!clicked) throw new Error(`[smoke-ui] scoped button ${buttonText} not found in ${scopeSelector}`);
   };
   const setValue = async (selector, value) => {
     const changed = await js(`(() => {
@@ -2791,7 +2927,7 @@ async function runUiSmoke(win) {
     ipcMain.handle(channel, handler);
   };
   replaceHandler("server.state", () => ({ ok: true, data: serverVisible ? smokeServer() : null }));
-  replaceHandler("connectivity.status", () => ({ ok: true, data: { bridges: bridgeConfigured ? [{ bridgeId: "bridge-smoke", endpoint: "wss://bridge.smoke.invalid/rendezvous", expiresAt: now + 86_400_000 }] : [], backgroundHosting: false } }));
+  replaceHandler("connectivity.status", () => ({ ok: true, data: { bridges: bridgeConfigured ? [{ bridgeId: "bridge-smoke", endpoint: "wss://bridge.smoke.invalid/rendezvous", expiresAt: now + 86_400_000 }] : [], backgroundHosting: false, activeRoute: smokeRoute, turn: { configured: false, provider: "cloudflare" } } }));
   replaceHandler("connectivity.ice-config", () => ({ ok: true, data: { iceServers: [], iceTransportPolicy: "all" } }));
   replaceHandler("server.create", async () => {
     createAttempts += 1;
@@ -2854,6 +2990,11 @@ async function runUiSmoke(win) {
   // de rota sem executar agentes reais nem abrir túneis. A segunda detecção modela o
   // usuário autenticando o ngrok fora do app (auth no agente).
   let providerDetectCount = 0;
+  let smokeRoute = null;
+  const setSmokeRoute = (route) => {
+    smokeRoute = route ? { ...route, endpoint: String(route.endpoint).replace(/\/$/, "") + "/signal" } : null;
+    return route;
+  };
   replaceHandler("connectivity.providers", async () => {
     providerDetectCount += 1;
     const ngrokAuthenticated = providerDetectCount >= 2;
@@ -2872,7 +3013,7 @@ async function runUiSmoke(win) {
   });
   replaceHandler("connectivity.provider.start", async (_event, { provider, config }) => {
     await pause(150);
-    if (provider === "ngrok" && !config?.token) {
+    if (provider === "ngrok" && !config?.token && providerDetectCount < 2) {
       return { ok: false, error: { code: "auth_required", message: "Informe o authtoken do ngrok uma vez." } };
     }
     if (provider === "manual") {
@@ -2882,7 +3023,7 @@ async function runUiSmoke(win) {
       const named = config?.mode === "named";
       return {
         ok: true,
-        data: {
+        data: setSmokeRoute({
           provider,
           endpoint: named ? `wss://${String(config.hostname)}/` : "wss://abc123.trycloudflare.com/",
           status: named ? "ready" : "limited",
@@ -2890,22 +3031,25 @@ async function runUiSmoke(win) {
           stable: named,
           startedAt: Date.now(),
           ...(named ? {} : { detail: "URL temporária — reinicie o túnel para obter um novo endereço." }),
-        },
+        }),
       };
     }
     return {
       ok: true,
-      data: {
+      data: setSmokeRoute({
         provider,
         endpoint: provider === "tailscale" ? "wss://smoke-machine.tail1234.ts.net/" : "wss://abc123.ngrok-free.app/",
         status: "ready",
         media: "direct-only",
         stable: provider === "tailscale",
         startedAt: Date.now(),
-      },
+      }),
     };
   });
-  replaceHandler("connectivity.provider.stop", async () => ({ ok: true, data: { stopped: true } }));
+  replaceHandler("connectivity.provider.stop", async () => {
+    setSmokeRoute(null);
+    return { ok: true, data: { stopped: true } };
+  });
 
   win.unmaximize();
   win.setContentSize(640, 480);
@@ -2940,7 +3084,7 @@ async function runUiSmoke(win) {
   await clickText("Criar comunidade");
   await waitForText("Em andamento");
   await assertSelector('[data-setup-step="host"][data-setup-status="running"]', "setup host running");
-  if (!await js(`document.activeElement?.getAttribute('data-smoke-section') === 'setup'`)) throw new Error("[smoke-ui] setup progress did not receive focus");
+  await waitForFocus(`document.activeElement?.getAttribute('data-smoke-section') === 'setup'`, "setup progress focus");
   await shot("04-setup-running-640x480", ['[data-smoke-section="setup"]']);
   await waitForText("A preparação foi interrompida");
   await waitFor(`document.querySelectorAll('[data-setup-status="skipped"]').length === 2`, "setup pending steps settled");
@@ -2958,7 +3102,7 @@ async function runUiSmoke(win) {
 
   await clickText("Adicionar JanjaBridge");
   await waitForText("Código de pareamento");
-  if (!await js(`document.activeElement?.id === 'bridge-pairing-code'`)) throw new Error("[smoke-ui] pairing did not focus its textarea");
+  await waitForFocus(`document.activeElement?.id === 'bridge-pairing-code'`, "pairing textarea focus");
   await shot("05-pairing-default-640x480", ['[data-smoke-screen="pairing"]']);
   await setValue("#bridge-pairing-code", "ERROR");
   await clickText("Adicionar");
@@ -2972,7 +3116,7 @@ async function runUiSmoke(win) {
   await assertNoText("JanjaBridge adicionado");
   await assertNoText("Comunidade pronta para uso");
   await assertText("Tentar ativar novamente");
-  if (!await js(`document.activeElement?.textContent.includes('Tentar ativar novamente')`)) throw new Error("[smoke-ui] warning action did not receive focus");
+  await waitForFocus(`document.activeElement?.textContent.includes('Tentar ativar novamente')`, "warning action focus");
   await shot("07-pairing-warning-640x480", ['[data-smoke-screen="pairing"]']);
   await clickText("Resolver depois");
   await assertSelector('[data-setup-step="bridge"][data-setup-status="warning"]', "warning preservado no setup");
@@ -2982,7 +3126,7 @@ async function runUiSmoke(win) {
   await setValue("#bridge-pairing-code", "VALID");
   await clickText("Adicionar");
   await waitForText("JanjaBridge adicionado");
-  if (!await js(`document.activeElement?.textContent.trim() === 'Concluir'`)) throw new Error("[smoke-ui] success action did not receive focus");
+  await waitForFocus(`document.activeElement?.textContent.trim() === 'Concluir'`, "success action focus");
   await shot("08-pairing-success-640x480", ['[data-smoke-screen="pairing"]']);
   await assertSelector('[data-setup-step="bridge"][data-setup-status="done"]', "bridge done após validação limpa");
   await clickText("Concluir");
@@ -3012,7 +3156,7 @@ async function runUiSmoke(win) {
 
   await clickTitle("Configurações do server");
   await waitForText("Configurações do server");
-  if (!await js(`document.activeElement?.getAttribute('aria-label') === 'Fechar configurações'`)) throw new Error("[smoke-ui] settings initial focus missing");
+  await waitForFocus(`document.activeElement?.getAttribute('aria-label') === 'Fechar configurações'`, "settings initial focus");
   const trapped = await js(`(() => {
     const dialog = document.querySelector('[role="dialog"][aria-labelledby="server-settings-title"]');
     const items = [...dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')].filter((item) => item.offsetParent !== null);
@@ -3039,13 +3183,11 @@ async function runUiSmoke(win) {
 
   await clickInHostGrant("grant-remote", "Revogar");
   await waitForText("O dispositivo perderá a autorização");
-  if (!await js(`document.querySelector('[role="alertdialog"]')?.contains(document.activeElement)`)) {
-    throw new Error("[smoke-ui] revoke confirmation did not receive initial focus");
-  }
+  await waitForFocus(`document.querySelector('[role="alertdialog"]')?.contains(document.activeElement)`, "revoke confirmation focus");
   await shot("14-host-revoke-confirmation-640x480", ['[data-smoke-critical="settings-dialog"]', '[role="alertdialog"]']);
   await pressEscape();
   if (await js(`!!document.querySelector('[role="alertdialog"]')`)) throw new Error("[smoke-ui] Escape did not close revoke confirmation");
-  if (!await js(`document.activeElement?.textContent?.includes('Revogar')`)) throw new Error("[smoke-ui] revoke trigger focus was not restored");
+  await waitForFocus(`document.activeElement?.textContent?.includes('Revogar')`, "revoke trigger focus restore");
   await clickInHostGrant("grant-remote", "Revogar");
   await clickInHostGrant("grant-remote", "Confirmar revogação");
   await waitForText("Revogação registrada e lista de hosts atualizada");
@@ -3061,7 +3203,7 @@ async function runUiSmoke(win) {
   await pressEscape();
   await pause(180);
   if (await js(`!!document.querySelector('[role="dialog"][aria-labelledby="server-settings-title"]')`)) throw new Error("[smoke-ui] Escape did not close settings");
-  if (!await js(`document.activeElement?.getAttribute('title') === 'Configurações do server'`)) throw new Error("[smoke-ui] settings focus was not restored");
+  await waitForFocus(`document.activeElement?.getAttribute('title') === 'Configurações do server'`, "settings focus restore");
 
   roleMode = "member";
   win.webContents.send("server.stateChanged", {});
@@ -3116,6 +3258,7 @@ async function runUiSmoke(win) {
   };
   await clickText("Conectividade");
   await waitForText("Acesso externo sem VPS");
+  await waitFor(`[...document.querySelectorAll('button')].some((entry) => entry.offsetParent !== null && !entry.disabled && entry.textContent.includes('Configurar conexão'))`, "Configurar conexão habilitado");
   await clickText("Configurar conexão");
   await waitFor(`!!document.querySelector('[data-smoke-screen="connectivity-wizard"]')`, "wizard de conectividade abriu");
   await waitForText("Escolha como publicar");
@@ -3148,7 +3291,7 @@ async function runUiSmoke(win) {
   await assertText("endereço pode mudar");
   await shot("21-ngrok-ready-960x600", ['[data-smoke-screen="connectivity-wizard"]']);
 
-  await clickText("Desligar rota");
+  await clickScoped('[data-smoke-screen="connectivity-wizard"]', "Desligar rota");
   await waitForText("Escolha como publicar", 20_000);
   await shot("22-connectivity-choosing-960x600", ['[data-smoke-screen="connectivity-wizard"]']);
 
@@ -3186,6 +3329,25 @@ async function runUiSmoke(win) {
   await waitFor(`!document.querySelector('[data-smoke-screen="connectivity-wizard"]')`, "wizard fechou");
   await pressEscape();
   await waitFor(`!document.querySelector('[role="dialog"][aria-labelledby="server-settings-title"]')`, "settings fechou após wizard");
+
+  // reativa a rota para evidenciar o badge persistente de rota ativa no header do server
+  await clickTitle("Configurações do server");
+  await clickText("Conectividade");
+  await waitFor(`[...document.querySelectorAll('button')].some((entry) => entry.offsetParent !== null && !entry.disabled && entry.textContent.includes('Configurar conexão'))`, "Configurar conexão habilitado (2)");
+  await clickText("Configurar conexão");
+  await waitFor(`!!document.querySelector('[data-smoke-screen="connectivity-wizard"]')`, "wizard reaberto");
+  await waitForText("Escolha como publicar");
+  await clickAriaPrefix("ngrok.");
+  await waitForText("Authtoken");
+  await clickText("Detectar e ativar");
+  await waitForText("Conexão externa pronta", 20_000);
+  await clickAriaExact("Fechar configuração de conexão");
+  await waitFor(`!document.querySelector('[data-smoke-screen="connectivity-wizard"]')`, "wizard fechado na segunda rodada");
+  await pressEscape();
+  await waitFor(`!document.querySelector('[role="dialog"][aria-labelledby="server-settings-title"]')`, "settings fechado na segunda rodada");
+  await waitFor(`!!document.querySelector('[data-smoke-critical="active-route-badge"]')`, "badge de rota ativa no header", 10_000);
+  await assertText("ngrok · rota ativa");
+  await shot("28-server-active-route-badge-640x480", ['[data-smoke-critical="active-route-badge"]']);
 
   const galleryManifest = await writePackagedUiGalleryExecutionManifest(shotDir, screenshotNames, startedAt);
   if (galleryManifest) console.log(`[smoke-ui] packaged execution manifest ${galleryManifest}`);
