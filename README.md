@@ -19,23 +19,29 @@ JanjaCord é um comunicador privado, invite-only e self-hosted para comunidades.
 criada localmente, o conteúdo é criptografado de ponta a ponta e cada comunidade pode ser mantida
 pelos computadores dos próprios membros.
 
-O desktop é a superfície principal atual. Ele inicia o host da comunidade, cria ou aceita um
-convite `JC3`, tenta conexão direta e usa um JanjaBridge comunitário quando a rede exige
-rendezvous, signaling ou TURN.
+O desktop é a superfície principal atual. Ele inicia o host da comunidade e oferece um assistente
+para publicar o JanjaNode sem VPS por Tailscale Funnel, ngrok ou Cloudflare Tunnel. Também aceita
+domínio próprio com Nginx. O convite `JC4` leva rotas WSS assinadas e vinculadas à chave do host;
+JanjaBridges comunitários continuam disponíveis como infraestrutura avançada e redundante.
 
-> **Estado do projeto:** candidato desktop R9 validado localmente no Linux. Ainda não é uma
-> release pública final: instalação e autostart em Windows real, login/reboot em sistemas reais e
-> o aceite WAN entre duas redes físicas continuam pendentes. Mobile está em uma fase posterior.
+> **Estado do projeto:** candidato desktop validado localmente no Linux, com os gates de código,
+> segurança, QA/release e UI/UX verdes para o fluxo zero-VPS. Ainda não é uma release pública
+> final: o dono precisa testar duas rotas plug-and-play, e instalação/assinatura em Windows real,
+> login/reboot e o aceite WAN entre duas redes físicas continuam pendentes. Mobile está em uma
+> fase posterior.
 
 ## O que funciona hoje
 
 - identidade pseudônima local com nickname, senha, vault cifrado e recovery key;
 - criação de comunidade com JanjaNode embutido no desktop do Owner;
-- entrada por um único convite `JC3`, sem conta central ou URL de host no fluxo comum;
+- entrada por um único convite `JC4`, com rotas WSS assinadas e host key pinada;
+- publicação sem VPS pelo app com Tailscale Funnel, ngrok ou Cloudflare Tunnel;
+- opção avançada de domínio próprio/Nginx e JanjaBridges comunitários;
 - mensagens de grupo E2EE com MLS, audience snapshot e purge por consumo ou retenção;
 - anexos cifrados, com o host armazenando apenas bytes cifrados e temporários;
 - canais, presença, roles, permissões, overrides, invites, kick e ban;
 - voz e vídeo em WebRTC mesh P2P, com modos direct-first e relay-only;
+- TURN da Cloudflare configurável no app, com credenciais efêmeras de curta duração;
 - Community Hosts autorizados para replicação, revogação e failover;
 - múltiplos JanjaBridges por comunidade, sem bridge global obrigatório da JanjaCord;
 - AppImage e DEB com fluxo de empacotamento e validação reproduzível;
@@ -46,14 +52,8 @@ rendezvous, signaling ou TURN.
 ```text
                          Internet
                             |
-                 +----------+----------+
-                 |                     |
-          JanjaBridge A         JanjaBridge B
-       rendezvous / TURN      rendezvous / TURN
-                 |                     |
-                 +----------+----------+
-                            |
-              signaling e conectividade efêmeros
+              rota WSS publicada pelo desktop
+       Tailscale / ngrok / Cloudflare / domínio próprio
                             |
         +-------------------+-------------------+
         |                                       |
@@ -63,6 +63,9 @@ rendezvous, signaling ou TURN.
         +---- snapshot cifrado ---- Community Host autorizado
                                       Replica / standby
 ```
+
+JanjaBridges comunitários podem complementar o fluxo com rendezvous, signaling e TURN,
+mas não são obrigatórios quando uma rota WSS direta publicada está disponível.
 
 ### Primary Host e Community Hosts
 
@@ -88,6 +91,20 @@ Como qualquer relay de rede, ele ainda pode observar metadados de transporte, co
 volume. Uma comunidade pode configurar vários bridges e não depende de infraestrutura operada pela
 JanjaCord.
 
+### Conectividade sem VPS
+
+O assistente de conectividade detecta e controla quatro opções de publicação:
+
+- **Tailscale Funnel:** rota estável dentro das regras da tailnet;
+- **ngrok:** quick tunnel usando a autenticação do agente ou token guardado pelo `safeStorage`;
+- **Cloudflare Tunnel:** quick tunnel ou túnel nomeado;
+- **domínio próprio/Nginx:** configuração avançada, ativada somente após validação TLS/WSS.
+
+A rota ativa fica visível no desktop e entra no convite `JC4` com assinatura, expiração e vínculo
+à identidade criptográfica do host. O cliente prova a chave do endpoint antes de concluir o join.
+Para áudio e vídeo quando a conexão P2P não atravessa o NAT, o Owner pode configurar Cloudflare
+TURN; o app solicita credenciais ICE curtas e não grava essas credenciais no convite.
+
 ## Privacidade e limites
 
 1. Não existe cadastro central por email ou telefone.
@@ -100,6 +117,8 @@ JanjaCord.
    concentrar metadata no operador TURN.
 7. O projeto promete privacidade de conteúdo e minimização de metadata, não anonimato absoluto.
 8. Não há recovery central: perder a identidade e a recovery key significa perder o acesso.
+9. Tailscale, ngrok e Cloudflare observam os metadados de transporte necessários para operar a
+   rota escolhida; eles não recebem plaintext do conteúdo E2EE.
 
 ## Componentes
 
@@ -150,8 +169,8 @@ Na primeira abertura:
 
 1. crie nickname e senha;
 2. guarde a recovery key;
-3. crie uma comunidade ou escolha `Adicionar servidor`;
-4. para entrar em outra comunidade, cole o convite `JC3` no campo único.
+3. crie uma comunidade e abra `Configurar conexão` para escolher uma rota externa;
+4. no outro desktop, cole o convite `JC4` no campo único.
 
 Para abrir um segundo perfil no mesmo computador:
 
@@ -185,7 +204,7 @@ pnpm --filter @janjacord/desktop run validate:release-config
 Os smokes cobrem conexão direta, TURN, relay-only, failover de bridge, grants, snapshot,
 replicação, promoção, self-fencing e os IPCs usados pelo fluxo operador.
 
-O candidato R9 passou localmente:
+O baseline R9 passou localmente:
 
 - 178 testes;
 - typecheck e build de todo o workspace;
@@ -195,6 +214,9 @@ O candidato R9 passou localmente:
 - instalação, execução e remoção do DEB em Debian Bookworm limpo.
 
 Esses resultados não substituem o aceite físico ainda pendente em Windows e WAN.
+
+Na entrega zero-VPS mais recente, os testes de protocolo passaram 15/15 e os testes do desktop,
+incluindo JC4, lifecycle dos providers e Cloudflare TURN, passaram 57/57 com typecheck do pacote.
 
 ## Empacotamento desktop
 
@@ -247,13 +269,16 @@ backup, update, rollback e diagnóstico está em
 
 - desktop Linux operável e empacotado;
 - setup sem host URL ou variável de ambiente no caminho comum;
-- convite JC3, JanjaBridge, conexão direct/TURN e multi-bridge;
+- convite JC4 com rota assinada, host key pinada e fallback sem downgrade silencioso;
+- wizard e lifecycle de Tailscale Funnel, ngrok, Cloudflare Tunnel e domínio próprio/Nginx;
+- Cloudflare TURN com credenciais curtas, conexão direct/TURN e multi-bridge;
 - Community Hosts, revogação, replicação, quorum e fencing;
 - mensagens, anexos e calls preservando os boundaries de privacidade;
 - reviews independentes de código, segurança, QA/release e UI/UX.
 
 ### Pendente antes da release desktop
 
+- concluir e assinar o teste do dono com duas opções plug-and-play;
 - instalar, remover, assinar e executar o NSIS em Windows real;
 - validar autostart e cleanup após login/reboot em Windows e Linux reais;
 - executar o fluxo completo em dois desktops e duas redes físicas;
