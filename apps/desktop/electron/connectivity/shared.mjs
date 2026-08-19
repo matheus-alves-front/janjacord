@@ -183,6 +183,7 @@ export function providerStatus(provider, state, values = {}) {
     stability: values.stability ?? null,
     message: values.message ?? null,
   };
+  if (typeof values.enabled === "boolean") status.enabled = values.enabled;
   if (values.nginxConfig !== undefined) status.nginxConfig = values.nginxConfig;
   if (Number.isInteger(values.pid) && values.pid > 1) status.pid = values.pid;
   return Object.freeze(status);

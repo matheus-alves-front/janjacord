@@ -6,6 +6,7 @@ import {
   createManualNginxProvider,
   createNgrokProvider,
   createTailscaleProvider,
+  createZrokProvider,
 } from "./providers.mjs";
 
 export const PROVIDER_IDS = Object.freeze({
@@ -14,6 +15,7 @@ export const PROVIDER_IDS = Object.freeze({
   CLOUDFLARED_QUICK: "cloudflared-quick",
   CLOUDFLARED_NAMED: "cloudflared-named",
   MANUAL_NGINX: "manual-nginx",
+  ZROK: "zrok",
 });
 
 const PROVIDER_ID_LIST = Object.freeze(Object.values(PROVIDER_IDS));
@@ -90,6 +92,10 @@ export function createProviderRegistry(injected = {}) {
     [PROVIDER_IDS.MANUAL_NGINX]: createManualNginxProvider({
       ...dependencies,
       id: PROVIDER_IDS.MANUAL_NGINX,
+    }),
+    [PROVIDER_IDS.ZROK]: createZrokProvider({
+      ...dependencies,
+      id: PROVIDER_IDS.ZROK,
     }),
   });
 

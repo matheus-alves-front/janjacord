@@ -403,3 +403,220 @@ export function createManualNginxProvider({ id, runner, baseEnvironment }) {
     },
   });
 }
+
+// ---------------------------------------------------------------- Zrok (zrok2 v2)
+
+export const ZROK_SHARE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const ZROK_ENV_ENABLED_PATTERN = /Account\s+Token[\s\S]{0,48}?<<SET>>/i;
+const ZROK_ENDPOINT_PROTOBUF_PATTERN = /frontendEndpoints\s*:\s*"([^"]+)"/g;
+const ZROK_ENDPOINT_LOG_PATTERN = /endpoints?\s*:\s*\r?\n\s*([A-Za-z0-9.-]+)/g;
+const ZROK_ENDPOINT_HOST_PATTERN = /([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9-]+)+)/gi;
+const ZROK_SHARE_TOKEN_PATTERN = /token\s*:\s*"([^"]+)"/;
+
+/**
+ * Detecta ambiente habilitado no output de `zrok2 status`. `zrok2 status` retorna exit 0 mesmo
+ * sem ambiente; a seção `Environment` com `Account Token <<SET>>` é o marcador real.
+ */
+export function zrokEnvironmentEnabled(text) {
+  return typeof text === "string" && ZROK_ENV_ENABLED_PATTERN.test(text);
+}
+
+/**
+ * Extrai o host público do endpoint de uma share Zrok a partir do output da CLI v2.
+ * Cobre o formato protobuf-text do agent (`frontendEndpoints:"host"`) e a linha
+ * `access your zrok share at the following endpoints: <host>` do share local.
+ */
+export function zrokShareEndpointFromOutput(text) {
+  if (typeof text !== "string") return null;
+  const candidates = [];
+  for (const match of text.matchAll(ZROK_ENDPOINT_PROTOBUF_PATTERN)) candidates.push(match[1]);
+  for (const match of text.matchAll(ZROK_ENDPOINT_LOG_PATTERN)) candidates.push(match[1]);
+  for (const match of text.matchAll(ZROK_ENDPOINT_HOST_PATTERN)) candidates.push(match[1]);
+  for (const candidate of candidates) {
+    const host = candidate.trim().toLowerCase().replace(/[),.;]+$/g, "");
+    if (host.length < 4 || host.length > 253 || !/^[a-z0-9.-]+$/.test(host) || host.startsWith(".") || host.endsWith(".")) continue;
+    return host;
+  }
+  return null;
+}
+
+/**
+ * Extrai o share token de uma linha protobuf-text (`token:"..."`). Usado para parar a share
+ * individual quando o agent Zrok é externo ao app (não derrubar o daemon do operador).
+ */
+export function zrokShareTokenFromOutput(text) {
+  if (typeof text !== "string") return null;
+  const match = text.match(ZROK_SHARE_TOKEN_PATTERN);
+  return match ? match[1] : null;
+}
+
+export function createZrokProvider({ id, runner, baseEnvironment }) {
+  let agentChild = null; // child do daemon agent que este adapter subiu (null = agent externo)
+  let shareToken = null; // token da share criada por este adapter
+  let current = providerStatus(id, "stopped", { installed: null, message: "Zrok is stopped." });
+
+  async function environmentEnabled(env, timeoutMs) {
+    const result = await runner.run("zrok2", ["status"], { env, timeoutMs });
+    return zrokEnvironmentEnabled(`${result.stdout}\n${result.stderr}`);
+  }
+
+  async function agentActive(env, timeoutMs) {
+    try {
+      await runner.run("zrok2", ["agent", "status"], { env, timeoutMs });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function ensureAgent(env, timeoutMs) {
+    if (await agentActive(env, timeoutMs)) return { owned: false };
+    const child = runner.spawn("zrok2", ["agent", "start"], { env });
+    const ownedChild = child;
+    attachLifecycle(ownedChild, () => {
+      if (agentChild !== ownedChild) return;
+      agentChild = null;
+      if (current.state === "running") {
+        current = providerStatus(id, "error", { installed: true, message: "Zrok agent exited unexpectedly." });
+      }
+    });
+    const deadline = Date.now() + Math.min(timeoutMs, 20_000);
+    for (;;) {
+      if (ownedChild.exitCode !== null || ownedChild.killed) {
+        throw new ProviderError(id, "process_exited", "Zrok agent exited during startup.");
+      }
+      if (await agentActive(env, 3_000)) break;
+      if (Date.now() >= deadline) {
+        throw new ProviderError(id, "startup_timeout", "Zrok agent did not become ready in time.");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    agentChild = ownedChild;
+    return { owned: true, child: ownedChild };
+  }
+
+  async function ensureName(env, name, timeoutMs) {
+    try {
+      await runner.run("zrok2", ["create", "name", "-n", "public", name], { env, timeoutMs });
+    } catch (error) {
+      const combined = `${String(error?.stderr ?? "")}\n${String(error?.stdout ?? "")}`;
+      if (error?.exitCode === 1 && /createShareNameConflict/i.test(combined)) return; // já reservado (idempotente)
+      throw new ProviderError(id, "zrok_name_conflict", `Não foi possível reservar o nome Zrok '${name}'.`);
+    }
+  }
+
+  async function startShare(env, name, timeoutMs) {
+    const result = await runner.run(
+      "zrok2",
+      ["share", "public", `127.0.0.1:${LOCAL_PORT}`, "-n", `public:${name}`, "--open", "--headless"],
+      { env, timeoutMs },
+    );
+    const text = `${result.stdout}\n${result.stderr}`;
+    const host = zrokShareEndpointFromOutput(text);
+    if (!host) throw new ProviderError(id, "endpoint_missing", "Zrok did not report a usable public endpoint.");
+    const endpoint = normalizeWssEndpoint(`wss://${host}/`);
+    return { endpoint, token: zrokShareTokenFromOutput(text) };
+  }
+
+  return Object.freeze({
+    id,
+    async detect(options = {}) {
+      const input = assertPlainOptions(options, DETECT_KEYS);
+      const env = buildEnvironment(baseEnvironment, input.env);
+      const timeoutMs = commandTimeout(input.timeoutMs);
+      try {
+        await runner.run("zrok2", ["version"], { env, timeoutMs });
+      } catch {
+        return providerStatus(id, "unavailable", {
+          installed: false,
+          message: "zrok2 CLI is not installed or could not be executed.",
+        });
+      }
+      let enabled = false;
+      try {
+        enabled = await environmentEnabled(env, timeoutMs);
+      } catch {
+        // status sem ambiente ainda retorna exit 0; falha aqui mantém enabled=false.
+      }
+      return providerStatus(id, "available", {
+        installed: true,
+        enabled,
+        message: enabled
+          ? "zrok2 CLI is available and the environment is enabled."
+          : "zrok2 CLI is available; enable the Zrok environment to publish routes.",
+      });
+    },
+    async start(options = {}) {
+      const input = assertPlainOptions(options, ["env", "name", "startupTimeoutMs"]);
+      const env = buildEnvironment(baseEnvironment, input.env);
+      const timeoutMs = startupTimeout(input.startupTimeoutMs);
+      const name = typeof input.name === "string" ? input.name.trim().toLowerCase() : "";
+      if (!ZROK_SHARE_NAME_PATTERN.test(name) || name.length > 63) {
+        throw new ProviderError(id, "invalid_name", "Zrok share name must be a 1-63 character lowercase hostname label.");
+      }
+      let owned = false;
+      try {
+        if (!(await environmentEnabled(env, timeoutMs))) {
+          throw new ProviderError(id, "zrok_env_not_enabled", "O ambiente Zrok não está habilitado nesta máquina. Rode `zrok2 enable <token> --headless` no terminal e tente novamente.");
+        }
+        const agent = await ensureAgent(env, timeoutMs);
+        owned = agent.owned;
+        await ensureName(env, name, timeoutMs);
+        const share = await startShare(env, name, timeoutMs);
+        shareToken = share.token;
+        current = providerStatus(id, "running", {
+          installed: true,
+          endpoint: share.endpoint,
+          stability: "account",
+          message: "Zrok is publishing the JanjaNode endpoint through a persistent named share.",
+          ...(agent.child?.pid ? { pid: agent.child.pid } : {}),
+        });
+        return current;
+      } catch (error) {
+        if (owned && agentChild) await runner.terminate(agentChild);
+        agentChild = null;
+        shareToken = null;
+        current = providerStatus(id, "error", { installed: null, message: "Zrok failed to start." });
+        throw sanitizedProviderError(id, error);
+      }
+    },
+    async status(options = {}) {
+      const input = assertPlainOptions(options, DETECT_KEYS);
+      if (current.state !== "running") return current;
+      const env = buildEnvironment(baseEnvironment, input.env);
+      try {
+        const result = await runner.run("zrok2", ["agent", "status"], {
+          env,
+          timeoutMs: commandTimeout(input.timeoutMs),
+        });
+        const host = zrokShareEndpointFromOutput(`${result.stdout}\n${result.stderr}`);
+        if (host && current.endpoint?.includes(host)) return current;
+        current = providerStatus(id, "error", { installed: true, message: "Zrok share is not active on the agent." });
+      } catch {
+        current = providerStatus(id, "error", { installed: true, message: "Zrok agent is not responding." });
+      }
+      return current;
+    },
+    async stop(options = {}) {
+      assertPlainOptions(options, []);
+      const ownedChild = agentChild;
+      agentChild = null;
+      if (ownedChild) {
+        // agent gerenciado pelo app: derrubar o daemon encerra todas as shares de forma
+        // determinística; o nome reservado persiste e o endpoint volta no próximo start.
+        await runner.terminate(ownedChild);
+      } else if (shareToken) {
+        // agent externo: parar apenas a share deste app para não derrubar o daemon do operador.
+        const env = buildEnvironment(baseEnvironment, {});
+        try {
+          await runner.run("zrok2", ["delete", "share", shareToken], { env, timeoutMs: 8_000 });
+        } catch {
+          // Best-effort; a rota pode já ter expirado ou o servidor estar inacessível.
+        }
+      }
+      shareToken = null;
+      current = providerStatus(id, "stopped", { installed: null, message: "Zrok is stopped." });
+      return current;
+    },
+  });
+}

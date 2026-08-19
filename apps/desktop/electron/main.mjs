@@ -80,7 +80,10 @@ import { execFileSync } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
-const HOST_PORT = 8931;
+const configuredHostPort = Number(process.env.JC_HOST_PORT ?? 8931);
+const HOST_PORT = Number.isInteger(configuredHostPort) && configuredHostPort >= 1024 && configuredHostPort <= 65535
+  ? configuredHostPort
+  : 8931;
 
 // ---------------------------------------------------------------- estado
 let identity = null; // { identityId, nickname, seed, dbKey }
@@ -89,6 +92,9 @@ let hostProcess = null;
 let replicaProcess = null;
 let client = null; // HostClient
 let serverState = null; // estado do server do host
+let activeSessionEndpoint = null;
+let activeSessionTrust = null;
+let activeSessionRoute = null;
 let channelSeq = new Map();
 let appQuitting = false;
 let callIceConfiguration = null;
@@ -391,7 +397,7 @@ function parseConnectivityConfigValue(value) {
   }
 }
 
-const CONNECTIVITY_PROVIDER_IDS = new Set(["tailscale", "ngrok", "cloudflare", "manual"]);
+const CONNECTIVITY_PROVIDER_IDS = new Set(["tailscale", "ngrok", "cloudflare", "manual", "zrok"]);
 
 function parsePersistedProviderRoute(value) {
   if (value == null) return null;
@@ -569,6 +575,7 @@ const UI_PROVIDER_TO_RUNTIME = Object.freeze({
   tailscale: PROVIDER_IDS.TAILSCALE_FUNNEL,
   ngrok: PROVIDER_IDS.NGROK,
   manual: PROVIDER_IDS.MANUAL_NGINX,
+  zrok: PROVIDER_IDS.ZROK,
 });
 
 function runtimeProviderId(provider, mode) {
@@ -583,7 +590,8 @@ function normalizeProviderStartInput(provider, value) {
     throw Object.assign(new Error("opção de conexão inválida"), { code: "invalid_input" });
   }
   const allowed = provider === "cloudflare" ? ["mode", "token", "hostname"]
-    : provider === "ngrok" ? ["token"] : provider === "manual" ? ["domain"] : [];
+    : provider === "ngrok" ? ["token"] : provider === "manual" ? ["domain"]
+      : provider === "zrok" ? ["name"] : [];
   if (Object.keys(value).some((key) => !allowed.includes(key))) {
     throw Object.assign(new Error("configuração de conexão contém campos desconhecidos"), { code: "invalid_input" });
   }
@@ -600,7 +608,13 @@ function normalizeProviderStartInput(provider, value) {
   if ((provider === "manual" || (provider === "cloudflare" && mode === "named")) && !domain) {
     throw Object.assign(new Error("informe o domínio público"), { code: "invalid_input" });
   }
-  return { provider, mode, token, domain };
+  const name = provider === "zrok"
+    ? (typeof value.name === "string" ? value.name.trim().toLowerCase() : "")
+    : "";
+  if (provider === "zrok" && (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(name) || name.length > 63)) {
+    throw Object.assign(new Error("nome da rota Zrok inválido (use minúsculas, números e hífens)"), { code: "invalid_input" });
+  }
+  return { provider, mode, token, domain, name };
 }
 
 function providerRouteEndpoint(endpoint) {
@@ -691,6 +705,7 @@ const PROVIDER_PROCESS_MARKERS = Object.freeze({
   ngrok: ["ngrok"],
   cloudflare: ["cloudflared"],
   tailscale: ["tailscale"],
+  zrok: ["zrok2"],
 });
 
 function providerProcessNameMatches(pid, provider) {
@@ -864,8 +879,79 @@ function initLocalDb() {
     "CREATE TABLE IF NOT EXISTS mls_groups (key TEXT PRIMARY KEY, state TEXT NOT NULL, updated_at INTEGER NOT NULL);" +
       "CREATE TABLE IF NOT EXISTS seen_messages (message_id TEXT PRIMARY KEY, consumed INTEGER NOT NULL DEFAULT 0);" +
       "CREATE TABLE IF NOT EXISTS mls_welcome_outbox (target_identity_id TEXT PRIMARY KEY, server_id TEXT NOT NULL, channel_id TEXT NOT NULL, welcome_b64 TEXT NOT NULL, created_at INTEGER NOT NULL);" +
-      "CREATE TABLE IF NOT EXISTS mls_welcome_receipts (welcome_hash TEXT PRIMARY KEY, consumed_at INTEGER NOT NULL);",
+      "CREATE TABLE IF NOT EXISTS mls_welcome_receipts (welcome_hash TEXT PRIMARY KEY, consumed_at INTEGER NOT NULL);" +
+      "CREATE TABLE IF NOT EXISTS communities (server_id TEXT PRIMARY KEY, server_name TEXT NOT NULL, connection_kind TEXT NOT NULL, connection_endpoint TEXT, trust_json TEXT, connection_route_json TEXT, invite_key TEXT, last_accessed_at INTEGER NOT NULL, created_at INTEGER NOT NULL);",
   );
+  const communityColumns = localDb.raw.pragma("table_info(communities)");
+  if (!communityColumns.some((column) => column.name === "connection_route_json")) {
+    localDb.raw.exec("ALTER TABLE communities ADD COLUMN connection_route_json TEXT");
+  }
+}
+
+function communityRegistryEntryFromRow(row) {
+  if (!row || typeof row.server_id !== "string" || typeof row.server_name !== "string") return null;
+  let trust = null;
+  try {
+    trust = row.trust_json ? JSON.parse(row.trust_json) : null;
+  } catch {
+    trust = null;
+  }
+  let route = null;
+  try {
+    route = row.connection_route_json ? JSON.parse(row.connection_route_json) : null;
+  } catch {
+    route = null;
+  }
+  return {
+    serverId: row.server_id,
+    serverName: row.server_name,
+    connectionKind: row.connection_kind === "primary" ? "primary" : "remote",
+    endpoint: typeof row.connection_endpoint === "string" ? row.connection_endpoint : null,
+    trust,
+    route,
+    inviteKey: typeof row.invite_key === "string" ? row.invite_key : null,
+    lastAccessedAt: Number(row.last_accessed_at) || 0,
+    createdAt: Number(row.created_at) || 0,
+  };
+}
+
+function upsertCommunityRegistryEntry(entry) {
+  if (!localDb || !entry || typeof entry.serverId !== "string" || entry.serverId.length < 1 || entry.serverId.length > 256) return;
+  const now = Date.now();
+  const existing = localDb.raw.prepare("SELECT created_at, connection_route_json FROM communities WHERE server_id = ?").get(entry.serverId);
+  let existingRoute = null;
+  try {
+    existingRoute = existing?.connection_route_json ? JSON.parse(existing.connection_route_json) : null;
+  } catch {
+    existingRoute = null;
+  }
+  const route = entry.route ?? existingRoute;
+  localDb.raw.prepare(
+    "INSERT INTO communities (server_id, server_name, connection_kind, connection_endpoint, trust_json, connection_route_json, invite_key, last_accessed_at, created_at) VALUES (?,?,?,?,?,?,?,?,?) " +
+      "ON CONFLICT(server_id) DO UPDATE SET server_name=excluded.server_name, connection_kind=excluded.connection_kind, connection_endpoint=excluded.connection_endpoint, trust_json=excluded.trust_json, connection_route_json=excluded.connection_route_json, invite_key=excluded.invite_key, last_accessed_at=excluded.last_accessed_at",
+  ).run(
+    entry.serverId,
+    String(entry.serverName ?? "Comunidade").trim().slice(0, 64) || "Comunidade",
+    entry.connectionKind === "primary" ? "primary" : "remote",
+    typeof entry.endpoint === "string" ? entry.endpoint.slice(0, 2048) : null,
+    entry.trust ? JSON.stringify(entry.trust).slice(0, 16_384) : null,
+    route ? JSON.stringify(route).slice(0, 32_768) : null,
+    typeof entry.inviteKey === "string" ? entry.inviteKey.slice(0, 4096) : null,
+    now,
+    Number(existing?.created_at) || now,
+  );
+}
+
+function listCommunityRegistry() {
+  if (!localDb) return [];
+  return localDb.raw.prepare("SELECT server_id, server_name, connection_kind, connection_endpoint, trust_json, connection_route_json, invite_key, last_accessed_at, created_at FROM communities ORDER BY last_accessed_at DESC, server_name COLLATE NOCASE ASC").all()
+    .map(communityRegistryEntryFromRow)
+    .filter(Boolean);
+}
+
+function getCommunityRegistryEntry(serverId) {
+  if (!localDb || typeof serverId !== "string") return null;
+  return communityRegistryEntryFromRow(localDb.raw.prepare("SELECT server_id, server_name, connection_kind, connection_endpoint, trust_json, connection_route_json, invite_key, last_accessed_at, created_at FROM communities WHERE server_id = ?").get(serverId));
 }
 
 function janjaNodeDirectRouteHints(config) {
@@ -882,7 +968,7 @@ function janjaNodeDirectRouteHints(config) {
 }
 
 // ---------------------------------------------------------------- janjanode (host)
-function spawnHost() {
+function spawnHost(serverName = "Meu Servidor") {
   if (hostProcess) return;
   const authoritySeed = deriveRuntimeSeed("janjacord-authority-signing-v1");
   const hostSeed = deriveRuntimeSeed("janjacord-host-signing-v1");
@@ -902,7 +988,7 @@ function spawnHost() {
     JC_OWNER_PUBLIC_KEY: ed25519PublicKey(identity.seed).toString("base64url"),
     JC_AUTHORITY_SIGNING_SEED: authoritySeed.toString("hex"),
     JC_HOST_SIGNING_SEED: hostSeed.toString("hex"),
-    JC_SERVER_NAME: "Meu Servidor",
+    JC_SERVER_NAME: serverName,
     JC_PORT: String(HOST_PORT),
     JC_DIRECT_ENDPOINT: privateLanEndpoint(),
     JC_DIRECT_ROUTE_HINTS: JSON.stringify(janjaNodeDirectRouteHints(connectivity)),
@@ -1375,16 +1461,52 @@ async function runDesktopMainContractSelfTest() {
 }
 
 // ---------------------------------------------------------------- ws client + MLS
-function connectToHost(url, trust = {}, timeoutMs = 5000) {
+function persistedDirectTrust(trust) {
+  if (!trust || typeof trust !== "object") return {};
+  const allowed = ["serverId", "authorityFingerprint", "expectedHostPublicKey", "expectedHostId"];
+  return Object.fromEntries(allowed
+    .filter((key) => typeof trust[key] === "string" && trust[key].length > 0)
+    .map((key) => [key, trust[key]]));
+}
+
+async function connectToHost(url, trust = {}, timeoutMs = 5000) {
   const nextClient = new HostClient(url, { identityId: identity.identityId, deviceSeed: identity.seed, ...trust });
   client = nextClient;
+  activeSessionEndpoint = url;
+  activeSessionTrust = trust;
+  activeSessionRoute = { kind: "direct", endpoint: url, trust: persistedDirectTrust(trust) };
   bindClientEvents();
-  return waitForClientOpen(timeoutMs, nextClient);
+  const opened = await waitForClientOpen(timeoutMs, nextClient);
+  if (!opened && client === nextClient) {
+    try { nextClient.close(); } catch { /* already closed */ }
+    client = null;
+    activeSessionEndpoint = null;
+    activeSessionTrust = null;
+    activeSessionRoute = null;
+  }
+  return opened;
 }
 
 function connectToIceHost(options) {
   const nextClient = new IceHostTransport({ ...options, identityId: identity.identityId, deviceSeed: identity.seed });
   client = nextClient;
+  activeSessionEndpoint = null;
+  activeSessionTrust = {
+    serverId: options.serverId,
+    authorityFingerprint: options.authorityFingerprint,
+    hostId: options.hostId,
+  };
+  activeSessionRoute = {
+    kind: "ice",
+    bridgeUrls: [...(options.bridgeUrls ?? [])],
+    serverId: options.serverId,
+    hostId: options.hostId,
+    authorityFingerprint: options.authorityFingerprint,
+    hostRegistration: options.hostRegistration,
+    inviteAccessHash: options.inviteAccessHash,
+    iceServers: [...(options.iceServers ?? [])],
+    networkPrivacy: options.networkPrivacy === "relay" ? "relay" : "direct",
+  };
   nextClient.onIceConfiguration((configuration) => {
     callIceConfiguration = configuration;
     notifyRenderer("connectivity.iceConfig", configuration);
@@ -1475,6 +1597,56 @@ function waitForClientOpen(timeoutMs, targetClient = client) {
     targetClient.onOpen(() => resolve(true));
     setTimeout(() => resolve(false), timeoutMs);
   });
+}
+
+async function closeActiveCommunitySession() {
+  try { client?.close(); } catch { /* já encerrado */ }
+  client = null;
+  serverState = null;
+  activeSessionEndpoint = null;
+  activeSessionTrust = null;
+  activeSessionRoute = null;
+  callIceConfiguration = null;
+  if (hostProcess) {
+    try {
+      await stopHostForRestart();
+    } catch {
+      stopHost();
+    }
+  }
+}
+
+async function openPrimaryCommunitySession(serverName = "Meu Servidor") {
+  if (!identity) throw Object.assign(new Error("identity required"), { code: "unauthorized" });
+  await closeActiveCommunitySession();
+  spawnHost(serverName);
+  const authoritySeed = deriveRuntimeSeed("janjacord-authority-signing-v1");
+  const hostSeed = deriveRuntimeSeed("janjacord-host-signing-v1");
+  const trust = {
+    authorityFingerprint: ed25519Fingerprint(ed25519PublicKey(authoritySeed)),
+    expectedHostPublicKey: ed25519PublicKey(hostSeed).toString("base64url"),
+  };
+  const deadline = Date.now() + 12_000;
+  let connected = false;
+  while (Date.now() < deadline && hostProcess) {
+    connected = await connectToHost(`ws://127.0.0.1:${HOST_PORT}/signal`, trust, 1_500).catch(() => false);
+    if (connected) break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  if (!connected || !client) throw Object.assign(new Error("host não respondeu"), { code: "host_offline" });
+  client.send("hello", { identityId: identity.identityId });
+  const stateRes = await new Promise((resolve) => {
+    client.onEventOnce("result", (frame) => resolve(frame.data));
+    setTimeout(() => resolve(null), 8_000);
+  });
+  if (!stateRes?.ok || !stateRes.data) throw Object.assign(new Error("host local não autenticou"), { code: "host_offline" });
+  serverState = stateRes.data;
+  bindPrimaryHostProfileServer(serverState.serverId);
+  const general = serverState.channels.find((channel) => channel.type === "text") ?? serverState.channels[0];
+  if (general) ensureGroup(serverState.serverId, general.id);
+  publishKeyPackage();
+  syncGroupMembership();
+  return serverState;
 }
 
 async function resolveAtBridge(url, request, timeoutMs = 5000) {
@@ -1790,11 +1962,15 @@ function registerIpc() {
     return { ok: true, identityId: identity.identityId };
   });
 
-  ipcMain.handle("server.create", async () => {
+  ipcMain.handle("server.create", async (_e, { name } = {}) => {
     if (!identity) return { ok: false, error: { code: "unauthorized", message: "identity required" } };
+    if (listCommunityRegistry().some((entry) => entry.connectionKind === "primary") || hostProcess) {
+      return { ok: false, error: { code: "primary_exists", message: "este dispositivo já hospeda uma comunidade local" } };
+    }
     try {
+      const serverName = typeof name === "string" && name.trim() ? name.trim().slice(0, 64) : "Minha comunidade";
       emitSetupStep("host", "running");
-      spawnHost();
+      spawnHost(serverName);
       await new Promise((r) => setTimeout(r, 1500));
       const authoritySeed = deriveRuntimeSeed("janjacord-authority-signing-v1");
       const hostSeed = deriveRuntimeSeed("janjacord-host-signing-v1");
@@ -1839,6 +2015,14 @@ function registerIpc() {
       ensureGroup(serverState.serverId, general.id);
       publishKeyPackage();
       syncGroupMembership();
+      upsertCommunityRegistryEntry({
+        serverId: serverState.serverId,
+        serverName: serverState.serverName,
+        connectionKind: "primary",
+        endpoint: activeSessionEndpoint,
+        trust: activeSessionTrust,
+        route: activeSessionRoute,
+      });
       emitSetupStep("access", "done", bridgeReady ? "Conexão pronta" : "Pronto nesta rede");
       return { ok: true, data: serverState, connectivity: { bridgeReady, needsBridge: !bridgeReady } };
     } catch (error) {
@@ -1849,7 +2033,7 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle("server.join", async (_e, {
+  const handleServerJoin = async (_e, {
     hostUrl,
     inviteKey,
     allowLegacyTrust,
@@ -2078,6 +2262,13 @@ function registerIpc() {
           pendingLegacyHostConfirmations: pending,
         });
       }
+      if (isLegacy) {
+        const pinnedHostKey = readConnectivityConfig().legacyHostPins?.[parsed.serverId];
+        if (typeof pinnedHostKey === "string" && pinnedHostKey.length > 0) {
+          activeSessionTrust = { ...activeSessionTrust, serverId: parsed.serverId, expectedHostPublicKey: pinnedHostKey };
+          activeSessionRoute = { kind: "direct", endpoint: target, trust: persistedDirectTrust(activeSessionTrust) };
+        }
+      }
     }
     client.send("hello", { identityId: identity.identityId });
     await new Promise((r) => setTimeout(r, 300));
@@ -2092,10 +2283,104 @@ function registerIpc() {
     } else {
       notifyRenderer("mls.ready", { epoch: 0 });
     }
+    upsertCommunityRegistryEntry({
+      serverId: serverState.serverId,
+      serverName: serverState.serverName,
+      connectionKind: "remote",
+      endpoint: activeSessionEndpoint,
+      trust: activeSessionTrust,
+      route: activeSessionRoute,
+      inviteKey,
+    });
     return { ok: true, data: serverState };
+  };
+  ipcMain.handle("server.join", handleServerJoin);
+
+  ipcMain.handle("community.list", () => {
+    const activeServerId = serverState?.serverId ?? null;
+    return {
+      ok: true,
+      data: listCommunityRegistry().map((entry) => ({
+        serverId: entry.serverId,
+        serverName: entry.serverName,
+        connectionKind: entry.connectionKind,
+        lastAccessedAt: entry.lastAccessedAt,
+        status: entry.serverId === activeServerId ? "active" : "saved",
+      })),
+    };
   });
 
-  ipcMain.handle("server.state", () => ({ ok: true, data: serverState }));
+  ipcMain.handle("community.activate", async (_e, { serverId } = {}) => {
+    const entry = getCommunityRegistryEntry(serverId);
+    if (!entry) return { ok: false, error: { code: "not_found", message: "Comunidade não encontrada neste dispositivo." } };
+    if (serverState?.serverId === entry.serverId && client?.ready) return { ok: true, data: serverState };
+    try {
+      if (entry.connectionKind === "primary") {
+        const activated = await openPrimaryCommunitySession(entry.serverName);
+        upsertCommunityRegistryEntry({ ...entry, endpoint: activeSessionEndpoint, trust: activeSessionTrust, route: activeSessionRoute });
+        return { ok: true, data: activated };
+      }
+      const savedRoute = entry.route;
+      if (savedRoute?.kind === "ice") {
+        await closeActiveCommunitySession();
+        const connected = await connectToIceHost(savedRoute);
+        if (!connected || !client) throw Object.assign(new Error("host não respondeu pelo JanjaBridge"), { code: "host_offline" });
+        client.send("hello", { identityId: identity.identityId });
+        const stateRes = await new Promise((resolve) => {
+          client.onEventOnce("result", (frame) => resolve(frame.data));
+          setTimeout(() => resolve(null), 8_000);
+        });
+        if (!stateRes?.ok || !stateRes.data || stateRes.data.serverId !== entry.serverId) {
+          throw Object.assign(new Error("a comunidade recusou a sessão ICE salva"), { code: "unauthorized" });
+        }
+        serverState = stateRes.data;
+        const general = serverState.channels.find((channel) => channel.type === "text") ?? serverState.channels[0];
+        if (general) ensureGroup(serverState.serverId, general.id);
+        publishKeyPackage();
+        syncGroupMembership();
+        upsertCommunityRegistryEntry({ ...entry, serverName: serverState.serverName, endpoint: null, trust: activeSessionTrust, route: activeSessionRoute });
+        return { ok: true, data: serverState };
+      }
+      if (!entry.endpoint) {
+        return { ok: false, error: { code: "reconnect_required", message: "Esta comunidade precisa de um novo convite para reconectar." } };
+      }
+      await closeActiveCommunitySession();
+      const directTrust = savedRoute?.kind === "direct" ? savedRoute.trust : entry.trust;
+      const connected = await connectToHost(entry.endpoint, directTrust ?? { serverId: entry.serverId });
+      if (!connected || !client) throw Object.assign(new Error("host não respondeu"), { code: "host_offline" });
+      client.send("hello", { identityId: identity.identityId });
+      const stateRes = await new Promise((resolve) => {
+        client.onEventOnce("result", (frame) => resolve(frame.data));
+        setTimeout(() => resolve(null), 8_000);
+      });
+      if (!stateRes?.ok || !stateRes.data || stateRes.data.serverId !== entry.serverId) {
+        throw Object.assign(new Error("a comunidade recusou a sessão salva"), { code: "unauthorized" });
+      }
+      serverState = stateRes.data;
+      const general = serverState.channels.find((channel) => channel.type === "text") ?? serverState.channels[0];
+      if (general) ensureGroup(serverState.serverId, general.id);
+      publishKeyPackage();
+      syncGroupMembership();
+      upsertCommunityRegistryEntry({ ...entry, serverName: serverState.serverName, endpoint: activeSessionEndpoint, trust: activeSessionTrust, route: activeSessionRoute });
+      return { ok: true, data: serverState };
+    } catch (error) {
+      return { ok: false, error: { code: error?.code ?? "unavailable", message: String(error?.message ?? "Não foi possível abrir a comunidade.") } };
+    }
+  });
+
+  ipcMain.handle("server.state", () => {
+    if (serverState && !getCommunityRegistryEntry(serverState.serverId)) {
+      upsertCommunityRegistryEntry({
+        serverId: serverState.serverId,
+        serverName: serverState.serverName,
+        connectionKind: hostProcess ? "primary" : "remote",
+        endpoint: activeSessionEndpoint,
+        trust: activeSessionTrust,
+        route: activeSessionRoute,
+      });
+    }
+    return { ok: true, data: serverState };
+  });
 
   ipcMain.handle("message.send", async (_e, { channelId, text }) => {
     if (!identity || !serverState) return { ok: false, error: { code: "unauthorized", message: "no server" } };
@@ -2125,6 +2410,14 @@ function registerIpc() {
 
   ipcMain.handle("invite.create", async () => {
     return sendCommand({ type: "invite.create", initialRoleId: "role-member", maxUses: 1 });
+  });
+
+  ipcMain.handle("clipboard.writeText", (_e, { text }) => {
+    if (typeof text !== "string" || text.length > 32 * 1024) {
+      return { ok: false, error: { code: "invalid_input", message: "invalid clipboard text" } };
+    }
+    clipboard.writeText(text);
+    return { ok: true, data: { written: true } };
   });
 
   ipcMain.handle("clipboard.clearIfEquals", (_e, { text }) => {
@@ -2305,6 +2598,7 @@ function registerIpc() {
         ["ngrok", PROVIDER_IDS.NGROK],
         ["cloudflare", PROVIDER_IDS.CLOUDFLARED_QUICK],
         ["manual", PROVIDER_IDS.MANUAL_NGINX],
+        ["zrok", PROVIDER_IDS.ZROK],
       ].map(async ([id, runtimeId]) => {
         const detected = await connectivityProviders.detect(runtimeId).catch(() => ({ installed: false, message: "Agente não detectado." }));
         return {
@@ -2312,6 +2606,7 @@ function registerIpc() {
           installed: id === "manual" ? true : detected.installed === true,
           ...(id === "ngrok" ? { authenticated: Boolean(secrets.ngrok) } : {}),
           ...(id === "cloudflare" ? { authenticated: Boolean(secrets.cloudflare) } : {}),
+          ...(id === "zrok" ? { enabled: detected.enabled === true } : {}),
           detail: detected.message || undefined,
         };
       }));
@@ -2353,7 +2648,9 @@ function registerIpc() {
             ? { startupTimeoutMs: 45_000 }
             : input.provider === "manual"
               ? { endpoint: `wss://${input.domain}/` }
-              : { startupTimeoutMs: 45_000 };
+              : input.provider === "zrok"
+                ? { name: input.name, startupTimeoutMs: 45_000 }
+                : { startupTimeoutMs: 45_000 };
       const started = await connectivityProviders.start(runtimeId, options);
       if (input.provider === "manual" && started.nginxConfig) {
         const configFile = path.join(userData(), "connectivity", "janjacord-nginx.conf");
@@ -3006,6 +3303,7 @@ async function runUiSmoke(win) {
           { id: "ngrok", installed: true, authenticated: ngrokAuthenticated, version: "3.39.5", detail: "CLI detectado." },
           { id: "cloudflare", installed: false, detail: "Agente não detectado." },
           { id: "manual", installed: true },
+          { id: "zrok", installed: true, enabled: providerDetectCount >= 2, version: "2.0.4", detail: "CLI detectado." },
         ],
         activeRoute: null,
       },
@@ -3018,6 +3316,19 @@ async function runUiSmoke(win) {
     }
     if (provider === "manual") {
       return { ok: false, error: { code: "verification_failed", message: "DNS, TLS e WSS não confirmados (simulado)" } };
+    }
+    if (provider === "zrok") {
+      return {
+        ok: true,
+        data: setSmokeRoute({
+          provider,
+          endpoint: `wss://${String(config?.name ?? "jc-smoke")}.shares.zrok.io/`,
+          status: "ready",
+          media: "direct-only",
+          stable: true,
+          startedAt: Date.now(),
+        }),
+      };
     }
     if (provider === "cloudflare") {
       const named = config?.mode === "named";
@@ -3100,7 +3411,7 @@ async function runUiSmoke(win) {
   await assertSelector('[data-setup-step="bridge"][data-setup-status="action"]', "setup bridge action");
   await shot("04c-setup-no-route-640x480", ['[data-smoke-section="setup"]']);
 
-  await clickText("Adicionar JanjaBridge");
+  await clickText("Já tenho pairing");
   await waitForText("Código de pareamento");
   await waitForFocus(`document.activeElement?.id === 'bridge-pairing-code'`, "pairing textarea focus");
   await shot("05-pairing-default-640x480", ['[data-smoke-screen="pairing"]']);
@@ -3122,7 +3433,7 @@ async function runUiSmoke(win) {
   await assertSelector('[data-setup-step="bridge"][data-setup-status="warning"]', "warning preservado no setup");
   await assertText("Adicione um JanjaBridge para acesso fora desta rede");
   await assertNoText("Comunidade pronta para uso");
-  await clickText("JanjaBridge configurado");
+  await clickText("Já tenho pairing");
   await setValue("#bridge-pairing-code", "VALID");
   await clickText("Adicionar");
   await waitForText("JanjaBridge adicionado");
@@ -3133,7 +3444,7 @@ async function runUiSmoke(win) {
   await assertSelector('[data-smoke-screen="server"]', "setup concluiu entrando na comunidade");
   await assertNoText("Continuar nesta rede");
   await shot("08a-setup-success-640x480", ['[data-smoke-screen="server"]']);
-  await clickTitle("Voltar");
+  await clickTitle("Voltar para suas comunidades");
   await assertSelector('[data-smoke-screen="home"]', "retorno para testar ingresso");
 
   await setValue("#invite-key", "ERROR");
@@ -3154,7 +3465,7 @@ async function runUiSmoke(win) {
   await waitForText("olá do smoke responsivo");
   await shot("10-conversation-640x480", ['[data-smoke-critical="composer"]']);
 
-  await clickTitle("Configurações do server");
+  await clickTitle("Configurações da comunidade");
   await waitForText("Configurações do server");
   await waitForFocus(`document.activeElement?.getAttribute('aria-label') === 'Fechar configurações'`, "settings initial focus");
   const trapped = await js(`(() => {
@@ -3203,12 +3514,12 @@ async function runUiSmoke(win) {
   await pressEscape();
   await pause(180);
   if (await js(`!!document.querySelector('[role="dialog"][aria-labelledby="server-settings-title"]')`)) throw new Error("[smoke-ui] Escape did not close settings");
-  await waitForFocus(`document.activeElement?.getAttribute('title') === 'Configurações do server'`, "settings focus restore");
+  await waitForFocus(`document.activeElement?.getAttribute('title') === 'Configurações da comunidade'`, "settings focus restore");
 
   roleMode = "member";
   win.webContents.send("server.stateChanged", {});
   await pause(180);
-  await clickTitle("Configurações do server");
+  await clickTitle("Configurações da comunidade");
   await clickText("Hosts");
   await waitForText("Modo somente leitura");
   await shot("16-hosts-permission-readonly-640x480", ['[data-smoke-critical="settings-dialog"]']);
@@ -3220,7 +3531,7 @@ async function runUiSmoke(win) {
   await setValue("#login-password", "senha-teste-123");
   await pressEnter();
   await waitForText("Membros (1)", 20_000);
-  await clickTitle("Configurações do server");
+  await clickTitle("Configurações da comunidade");
   await clickText("Hosts");
   await waitForText("A comunidade está offline no momento");
   await assertText("Tentar novamente");
@@ -3268,7 +3579,7 @@ async function runUiSmoke(win) {
   await assertSelector('button[aria-label^="Domínio próprio"]', "card Domínio próprio");
   await assertText("Precisa instalar");
   await assertText("Precisa entrar");
-  await assertText("Hospedagem avançada · JanjaBridge");
+  await assertText("Tutorial servidor JanjaBridge");
   await shot("19-connectivity-choose-960x600", ['[data-smoke-screen="connectivity-wizard"]']);
 
   await clickAriaPrefix("ngrok.");
@@ -3317,6 +3628,20 @@ async function runUiSmoke(win) {
   await clickText("Cancelar");
   await waitForText("Escolha como publicar");
 
+  // Zrok: card, nome da rota e rota persistente simulada
+  await clickAriaPrefix("Zrok.");
+  await waitFor(`!!document.querySelector('#connectivity-zrok-name')`, "campo de nome Zrok");
+  await shot("25b-zrok-config-960x600", ['[data-smoke-screen="connectivity-wizard"]']);
+  await setValue("#connectivity-zrok-name", "jc-smoke");
+  await pause(150);
+  await clickText("Detectar e ativar");
+  await waitForText("Conexão externa pronta", 20_000);
+  await assertText("jc-smoke.shares.zrok.io");
+  await assertText("endereço estável");
+  await shot("25c-zrok-ready-960x600", ['[data-smoke-screen="connectivity-wizard"]']);
+  await clickScoped('[data-smoke-screen="connectivity-wizard"]', "Desligar rota");
+  await waitForText("Escolha como publicar", 20_000);
+
   expectedViewport = { width: 640, height: 480 };
   win.unmaximize();
   win.setContentSize(expectedViewport.width, expectedViewport.height);
@@ -3331,7 +3656,7 @@ async function runUiSmoke(win) {
   await waitFor(`!document.querySelector('[role="dialog"][aria-labelledby="server-settings-title"]')`, "settings fechou após wizard");
 
   // reativa a rota para evidenciar o badge persistente de rota ativa no header do server
-  await clickTitle("Configurações do server");
+  await clickTitle("Configurações da comunidade");
   await clickText("Conectividade");
   await waitFor(`[...document.querySelectorAll('button')].some((entry) => entry.offsetParent !== null && !entry.disabled && entry.textContent.includes('Configurar conexão'))`, "Configurar conexão habilitado (2)");
   await clickText("Configurar conexão");
@@ -3564,7 +3889,7 @@ async function runOperatorSmoke(win) {
 
     // A 2->1 reduction may intentionally leave a restarted writer read-only under quorum
     // policy. Exercise it only after the invite/member/attachment acceptance path is complete.
-    await clickTitle("Configurações do server");
+    await clickTitle("Configurações da comunidade");
     await clickText("Conectividade");
     await waitFor(`document.querySelectorAll('button[aria-label="Remover JanjaBridge"]').length === 3`, "three bridge rows");
     for (const expectedCount of [2, 1]) {

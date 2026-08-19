@@ -115,6 +115,10 @@ textarea:disabled {
   white-space: nowrap;
 }
 
+.settings-layout {
+  min-height: 0;
+}
+
 @media (max-width: 700px) {
   .home-shell {
     padding: 1rem;
@@ -137,6 +141,27 @@ textarea:disabled {
     overflow-x: auto;
     padding-left: 0.5rem;
     padding-right: 0.5rem;
+  }
+
+  .settings-layout {
+    flex-direction: column;
+  }
+
+  .settings-layout .settings-tablist {
+    width: 100%;
+    flex-direction: row;
+    border-right: 0;
+    border-bottom: 1px solid #27272a;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .settings-layout .settings-tablist > p {
+    display: none;
+  }
+
+  .settings-layout .settings-tablist > [role="tab"] {
+    min-width: 8rem;
   }
 
   .settings-row,

@@ -9,6 +9,11 @@ import {
   statusProvider,
   stopProvider,
 } from "./index.mjs";
+import {
+  zrokEnvironmentEnabled,
+  zrokShareEndpointFromOutput,
+  zrokShareTokenFromOutput,
+} from "./providers.mjs";
 
 function commandKey(command, args) {
   return `${command} ${args.join(" ")}`;
@@ -16,12 +21,19 @@ function commandKey(command, args) {
 
 function fakeExecFile(fixtures = {}) {
   const calls = [];
+  const sequences = new Map();
   const execFile = (command, args, options, callback) => {
     calls.push({ command, args, options });
     queueMicrotask(() => {
-      const fixture = fixtures[commandKey(command, args)] ?? fixtures[command] ?? { stdout: "ok" };
+      let fixture = fixtures[commandKey(command, args)] ?? fixtures[command] ?? { stdout: "ok" };
+      if (Array.isArray(fixture)) {
+        const key = commandKey(command, args);
+        const queue = sequences.get(key) ?? [...fixture];
+        sequences.set(key, queue);
+        fixture = queue.shift() ?? { stdout: "ok" };
+      }
       if (fixture instanceof Error) {
-        callback(fixture, "", "");
+        callback(fixture, String(fixture.stdout ?? ""), String(fixture.stderr ?? ""));
         return;
       }
       callback(null, fixture.stdout ?? "", fixture.stderr ?? "");
@@ -66,6 +78,7 @@ describe("connectivity integration API", () => {
       CLOUDFLARED_QUICK: "cloudflared-quick",
       CLOUDFLARED_NAMED: "cloudflared-named",
       MANUAL_NGINX: "manual-nginx",
+      ZROK: "zrok",
     });
     expect(Object.keys(registry)).toEqual(["ids", "providers", "get", "detect", "start", "status", "stop"]);
     expect(registry.ids).toEqual(Object.values(PROVIDER_IDS));
@@ -93,10 +106,13 @@ describe("connectivity integration API", () => {
       ["cloudflared", ["--version"]],
       ["cloudflared", ["--version"]],
       ["nginx", ["-v"]],
+      ["zrok2", ["version"]],
+      ["zrok2", ["status"]],
     ]);
     expect(execFile.calls.every(({ options }) => options.shell === false)).toBe(true);
     expect(results.slice(0, 4).every((status) => status.state === "available" && status.installed)).toBe(true);
     expect(results[4]).toMatchObject({ provider: "manual-nginx", state: "available", installed: false });
+    expect(results[5]).toMatchObject({ provider: "zrok", state: "available", installed: true });
   });
 
   it("uses the injected spawn for one-shot commands when execFile is omitted", async () => {
@@ -330,5 +346,164 @@ describe("provider adapters", () => {
       startupTimeoutMs: 1_000,
     })).rejects.toMatchObject({ code: "auth_required" });
     await expect(registry.status(PROVIDER_IDS.NGROK)).resolves.toMatchObject({ state: "error", endpoint: null });
+  });
+});
+
+describe("zrok adapter", () => {
+  const STATUS_ENABLED = [
+    "Config:",
+    "╭──────────────────┬────────────────────────┬────────╮",
+    "│ CONFIG           │ VALUE                  │ SOURCE │",
+    "├──────────────────┼────────────────────────┼────────┤",
+    "│ apiEndpoint      │ https://api-v2.zrok.io │ env    │",
+    "╰──────────────────┴────────────────────────┴────────╯",
+    "Environment:",
+    "╭───────────────┬─────────╮",
+    "│ Account Token │ <<SET>> │",
+    "│ EnvZId        │ <<SET>> │",
+    "╰───────────────┴─────────╯",
+  ].join("\n");
+  const STATUS_DISABLED = [
+    "Config:",
+    "╭──────────────────┬────────────────────────┬────────╮",
+    "│ apiEndpoint      │ https://api-v2.zrok.io │ binary │",
+    "╰──────────────────┴────────────────────────┴────────╯",
+    "To create a local environment use the zrok2 enable command.",
+  ].join("\n");
+  const AGENT_WITH_SHARE = [
+    "SHARES",
+    "╭──────────────┬────────────┬──────────────┬────────────────────────────┬───────────────────────┬────────╮",
+    "│ SHARE TOKEN  │ SHARE MODE │ BACKEND MODE │ FRONTEND ENDPOINTS         │ TARGET                │ STATUS │",
+    "├──────────────┼────────────┼──────────────┼────────────────────────────┼───────────────────────┼────────┤",
+    "│ d2ytcsir2f3k │ public     │ proxy        │ meu-servidor.shares.zrok.io │ http://127.0.0.1:8931 │ active │",
+    "╰──────────────┴────────────┴──────────────┴────────────────────────────┴───────────────────────┴────────╯",
+    "1 active, 0 retrying, 0 failed",
+  ].join("\n");
+  const AGENT_EMPTY = "SHARES\n0 active, 0 retrying, 0 failed";
+  const SHARE_OUTPUT = 'token:"abc123"  frontendEndpoints:"meu-servidor.shares.zrok.io"';
+
+  it("detects zrok2 as available and reports the environment state", async () => {
+    const execFile = fakeExecFile({
+      "zrok2 version": { stdout: "v2.0.4" },
+      "zrok2 status": { stdout: STATUS_ENABLED },
+    });
+    const registry = createProviderRegistry({ spawn: fakeSpawn(), execFile });
+
+    await expect(registry.detect(PROVIDER_IDS.ZROK)).resolves.toMatchObject({
+      provider: "zrok",
+      state: "available",
+      installed: true,
+      enabled: true,
+    });
+
+    const disabled = fakeExecFile({
+      "zrok2 version": { stdout: "v2.0.4" },
+      "zrok2 status": { stdout: STATUS_DISABLED },
+    });
+    const registryDisabled = createProviderRegistry({ spawn: fakeSpawn(), execFile: disabled });
+    await expect(registryDisabled.detect(PROVIDER_IDS.ZROK)).resolves.toMatchObject({ installed: true, enabled: false });
+  });
+
+  it("reports unavailable when zrok2 is missing", async () => {
+    const execFile = fakeExecFile({
+      "zrok2 version": Object.assign(new Error("missing"), { code: "ENOENT" }),
+    });
+    const registry = createProviderRegistry({ spawn: fakeSpawn(), execFile });
+    await expect(registry.detect(PROVIDER_IDS.ZROK)).resolves.toMatchObject({
+      state: "unavailable",
+      installed: false,
+    });
+  });
+
+  it("starts a persistent named share, spawning the agent daemon, and stops it by terminating the owned agent", async () => {
+    const execFile = fakeExecFile({
+      "zrok2 status": { stdout: STATUS_ENABLED },
+      "zrok2 agent status": [new Error("agent absent"), { stdout: AGENT_EMPTY }, { stdout: AGENT_WITH_SHARE }],
+      "zrok2 create name -n public meu-servidor": { stdout: "created name 'meu-servidor' in namespace 'public'" },
+      "zrok2 share public 127.0.0.1:8931 -n public:meu-servidor --open --headless": { stdout: SHARE_OUTPUT },
+    });
+    const spawn = fakeSpawn();
+    const registry = createProviderRegistry({ spawn, execFile });
+
+    const started = await registry.start(PROVIDER_IDS.ZROK, { name: "meu-servidor", startupTimeoutMs: 5_000 });
+    expect(started).toMatchObject({
+      state: "running",
+      installed: true,
+      endpoint: "wss://meu-servidor.shares.zrok.io/",
+      stability: "account",
+    });
+    expect(started.pid).toBeTypeOf("number");
+    expect(spawn.calls.map(({ command, args }) => [command, args])).toEqual([["zrok2", ["agent", "start"]]]);
+
+    const checked = await registry.status(PROVIDER_IDS.ZROK);
+    expect(checked).toMatchObject({ state: "running", endpoint: "wss://meu-servidor.shares.zrok.io/" });
+
+    const stopped = await registry.stop(PROVIDER_IDS.ZROK);
+    expect(stopped).toMatchObject({ state: "stopped", endpoint: null });
+    expect(spawn.calls[0].child.signals.length).toBeGreaterThan(0);
+  });
+
+  it("reuses an external agent and stops only the app share via delete share", async () => {
+    const execFile = fakeExecFile({
+      "zrok2 status": { stdout: STATUS_ENABLED },
+      "zrok2 agent status": { stdout: AGENT_WITH_SHARE },
+      "zrok2 create name -n public meu-servidor": { stdout: "created name 'meu-servidor' in namespace 'public'" },
+      "zrok2 share public 127.0.0.1:8931 -n public:meu-servidor --open --headless": { stdout: SHARE_OUTPUT },
+      "zrok2 delete share abc123": { stdout: "deleted share 'abc123'" },
+    });
+    const spawn = fakeSpawn();
+    const registry = createProviderRegistry({ spawn, execFile });
+
+    const started = await registry.start(PROVIDER_IDS.ZROK, { name: "meu-servidor", startupTimeoutMs: 5_000 });
+    expect(started).toMatchObject({ state: "running", stability: "account" });
+    expect(spawn.calls).toEqual([]);
+
+    await registry.stop(PROVIDER_IDS.ZROK);
+    expect(execFile.calls.some(({ command, args }) => command === "zrok2" && args[0] === "delete" && args[2] === "abc123")).toBe(true);
+  });
+
+  it("fails with zrok_env_not_enabled before spawning anything", async () => {
+    const execFile = fakeExecFile({ "zrok2 status": { stdout: STATUS_DISABLED } });
+    const spawn = fakeSpawn();
+    const registry = createProviderRegistry({ spawn, execFile });
+
+    await expect(registry.start(PROVIDER_IDS.ZROK, { name: "meu-servidor" })).rejects.toMatchObject({ code: "zrok_env_not_enabled" });
+    expect(spawn.calls).toEqual([]);
+    expect(execFile.calls.map(({ command, args }) => [command, args])).toEqual([["zrok2", ["status"]]]);
+  });
+
+  it("rejects an invalid share name before running commands", async () => {
+    const execFile = fakeExecFile();
+    const registry = createProviderRegistry({ spawn: fakeSpawn(), execFile });
+    await expect(registry.start(PROVIDER_IDS.ZROK, { name: "Nome_Inválido!" })).rejects.toMatchObject({ code: "invalid_name" });
+    expect(execFile.calls).toEqual([]);
+  });
+
+  it("treats a duplicated reserved name as idempotent and still publishes", async () => {
+    const conflict = Object.assign(new Error("conflict"), {
+      code: 1,
+      stderr: '[ERROR]: unable to create name ([POST /share/name][409] createShareNameConflict "")',
+    });
+    const execFile = fakeExecFile({
+      "zrok2 status": { stdout: STATUS_ENABLED },
+      "zrok2 agent status": { stdout: AGENT_WITH_SHARE },
+      "zrok2 create name -n public meu-servidor": conflict,
+      "zrok2 share public 127.0.0.1:8931 -n public:meu-servidor --open --headless": { stdout: SHARE_OUTPUT },
+    });
+    const registry = createProviderRegistry({ spawn: fakeSpawn(), execFile });
+    await expect(registry.start(PROVIDER_IDS.ZROK, { name: "meu-servidor", startupTimeoutMs: 5_000 }))
+      .resolves.toMatchObject({ state: "running", endpoint: "wss://meu-servidor.shares.zrok.io/" });
+  });
+
+  it("parses v2 output formats for environment, endpoint and share token", async () => {
+    expect(zrokEnvironmentEnabled(STATUS_ENABLED)).toBe(true);
+    expect(zrokEnvironmentEnabled(STATUS_DISABLED)).toBe(false);
+    expect(zrokEnvironmentEnabled("ok")).toBe(false);
+    expect(zrokShareEndpointFromOutput(SHARE_OUTPUT)).toBe("meu-servidor.shares.zrok.io");
+    expect(zrokShareEndpointFromOutput("access your zrok share at the following endpoints:\n 56pxrooyccnb.shares.zrok.io"))
+      .toBe("56pxrooyccnb.shares.zrok.io");
+    expect(zrokShareEndpointFromOutput("no endpoint here")).toBeNull();
+    expect(zrokShareTokenFromOutput(SHARE_OUTPUT)).toBe("abc123");
+    expect(zrokShareTokenFromOutput("nothing")).toBeNull();
   });
 });

@@ -1,5 +1,9 @@
 # JanjaBridge self-hosted
 
+Para um caminho guiado do zero até o pairing no desktop, veja
+[`docs/tutorial-janjabridge-server.md`](../../docs/tutorial-janjabridge-server.md). Este arquivo
+continua sendo a referência detalhada de operação, backup, update, rollback e diagnóstico.
+
 Este diretório entrega o plano de dados público mínimo do JanjaBridge: rendezvous/signaling do
 repo, coturn com credenciais REST, Nginx para HTTPS/WSS e Certbot para certificado público. O
 rendezvous persiste somente revogações e high-water marks necessários para impedir replay,

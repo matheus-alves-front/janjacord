@@ -22,6 +22,8 @@ describe("connectivity provider configuration", () => {
       cloudflareMode: "named",
     })).toEqual({ mode: "named", token: "named-secret", hostname: "chat.example.com" });
     expect(buildProviderConfig("manual", { ...emptyForm, domain: " Host.Example.com. " })).toEqual({ domain: "host.example.com" });
+    expect(buildProviderConfig("zrok", { ...emptyForm, domain: "Meu-Servidor" })).toEqual({ name: "meu-servidor" });
+    expect(buildProviderConfig("zrok", emptyForm)).toEqual({});
   });
 
   it("removes secrets from form state immediately after submission", () => {
@@ -51,6 +53,18 @@ describe("connectivity provider configuration", () => {
     expect(providerBlockReason(
       { id: "manual", installed: false },
       { ...emptyForm, domain: "chat.example.com" },
+    )).toBeNull();
+    expect(providerBlockReason(
+      { id: "zrok", installed: true, enabled: false },
+      { ...emptyForm, domain: "meu-servidor" },
+    )).toMatch(/habilite o ambiente zrok/i);
+    expect(providerBlockReason(
+      { id: "zrok", installed: true, enabled: true },
+      emptyForm,
+    )).toMatch(/nome para a rota/i);
+    expect(providerBlockReason(
+      { id: "zrok", installed: true, enabled: true },
+      { ...emptyForm, domain: "meu-servidor" },
     )).toBeNull();
   });
 });

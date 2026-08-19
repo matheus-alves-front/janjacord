@@ -355,4 +355,16 @@ describe("connectivity schemas", () => {
     expect(HostCommandSchema.safeParse({ type: "server.join", inviteKey: "J", nickname: "N".repeat(65) }).success).toBe(false);
     expect(HostCommandSchema.safeParse({ type: "server.join", inviteKey: "J".repeat(2049) }).success).toBe(false);
   });
+
+  it("accepts zrok as a direct route provider with a stable persistent route", () => {
+    const zrokRoute = {
+      ...directRoutePayload,
+      provider: "zrok",
+      endpoint: "wss://meu-servidor.shares.zrok.io/signal",
+      stable: true,
+    } as const;
+    expect(DirectRouteHintPayloadSchema.parse(zrokRoute)).toEqual(zrokRoute);
+    expect(DirectRouteHintPayloadSchema.safeParse({ ...zrokRoute, provider: "wireguard" }).success).toBe(false);
+    expect(DirectRouteHintsConfigSchema.safeParse([{ provider: "zrok", endpoint: "wss://meu-servidor.shares.zrok.io/signal", stable: true, expiresAt: 2_000 }]).success).toBe(true);
+  });
 });

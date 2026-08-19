@@ -93,11 +93,13 @@ JanjaCord.
 
 ### Conectividade sem VPS
 
-O assistente de conectividade detecta e controla quatro opções de publicação:
+O assistente de conectividade detecta e controla cinco opções de publicação:
 
 - **Tailscale Funnel:** rota estável dentro das regras da tailnet;
 - **ngrok:** quick tunnel usando a autenticação do agente ou token guardado pelo `safeStorage`;
 - **Cloudflare Tunnel:** quick tunnel ou túnel nomeado;
+- **Zrok:** túnel com endereço estável sem abrir portas, hosted ou self-hosted (guia:
+  [docs/guia-zrok-connectivity.md](docs/guia-zrok-connectivity.md));
 - **domínio próprio/Nginx:** configuração avançada, ativada somente após validação TLS/WSS.
 
 A rota ativa fica visível no desktop e entra no convite `JC4` com assinatura, expiração e vínculo
@@ -261,6 +263,7 @@ docker compose ps
 O primeiro certificado é apenas bootstrap. Não distribua o pairing antes de
 `issue-certificate.sh` concluir com um certificado ACME válido. O guia de DNS, portas, secrets,
 backup, update, rollback e diagnóstico está em
+[docs/tutorial-janjabridge-server.md](docs/tutorial-janjabridge-server.md) e
 [infra/docker/README.md](infra/docker/README.md).
 
 ## Estado do roadmap

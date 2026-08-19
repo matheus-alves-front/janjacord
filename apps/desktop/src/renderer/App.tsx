@@ -12,8 +12,10 @@ interface WindowApi {
   identityCreate: (nickname: string, password: string) => Promise<{ ok: boolean; identityId?: string; recoveryKey?: string; error?: { message: string } }>;
   identityUnlock: (password: string) => Promise<{ ok: boolean; error?: { message: string } }>;
   identityRestore: (recoveryKey: string, nickname: string, newPassword: string) => Promise<{ ok: boolean; error?: { message: string } }>;
-  serverCreate: () => Promise<{ ok: boolean; data?: unknown; connectivity?: { bridgeReady: boolean; needsBridge: boolean }; error?: { code?: string; message: string } }>;
+  serverCreate: (name: string) => Promise<{ ok: boolean; data?: unknown; connectivity?: { bridgeReady: boolean; needsBridge: boolean }; error?: { code?: string; message: string } }>;
   serverJoin: (hostUrl: string, inviteKey: string, allowLegacyTrust?: boolean) => Promise<{ ok: boolean; data?: unknown; error?: IpcError }>;
+  communityList: () => Promise<{ ok: boolean; data?: CommunitySummary[]; error?: IpcError }>;
+  communityActivate: (serverId: string) => Promise<{ ok: boolean; data?: unknown; error?: IpcError }>;
   connectivityStatus: () => Promise<{ ok: boolean; data?: { bridges: { bridgeId: string; endpoint: string; expiresAt: number }[]; activeRoute?: ConnectivityRoute | null; backgroundHosting: boolean; turn?: { configured: boolean; provider: string } }; error?: IpcError }>;
   connectivityTurnSet: (keyId: string, apiToken: string) => Promise<{ ok: boolean; data?: { configured: boolean; provider: string }; error?: IpcError }>;
   connectivityTurnClear: () => Promise<{ ok: boolean; data?: { configured: boolean }; error?: IpcError }>;
@@ -44,17 +46,19 @@ interface WindowApi {
   revokeInvite: (inviteId: string) => Promise<{ ok: boolean; error?: { message: string } }>;
   channelCreate: (channelType: "text" | "call", name: string) => Promise<{ ok: boolean; error?: { message: string } }>;
   inviteCreate: () => Promise<{ ok: boolean; data?: { inviteId: string; inviteKey: string }; error?: { message: string } }>;
+  clipboardWriteText: (text: string) => Promise<{ ok: boolean; data?: { written: boolean }; error?: { code?: string; message: string } }>;
   clipboardClearIfEquals: (text: string) => Promise<{ ok: boolean; data?: { cleared: boolean }; error?: { message: string } }>;
   hostUrl: () => Promise<string>;
   on: (channel: string, cb: (data: unknown) => void) => void;
 }
 
-export type ConnectivityProviderId = "tailscale" | "ngrok" | "cloudflare" | "manual";
+export type ConnectivityProviderId = "tailscale" | "ngrok" | "cloudflare" | "manual" | "zrok";
 
 export interface ConnectivityProvider {
   id: ConnectivityProviderId;
   installed: boolean;
   authenticated?: boolean;
+  enabled?: boolean;
   version?: string;
   detail?: string;
 }
@@ -68,6 +72,14 @@ export interface ConnectivityRoute {
   startedAt: number;
   expiresAt?: number;
   detail?: string;
+}
+
+export interface CommunitySummary {
+  serverId: string;
+  serverName: string;
+  connectionKind: "primary" | "remote";
+  lastAccessedAt: number;
+  status: "active" | "saved";
 }
 
 declare global {

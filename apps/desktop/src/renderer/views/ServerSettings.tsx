@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { HardDrive, KeyRound, Link2, LoaderCircle, Network, Plus, RefreshCw, ShieldCheck, Trash2, X } from "lucide-react";
+import { BookOpen, HardDrive, KeyRound, Link2, LoaderCircle, Network, Plus, RefreshCw, ShieldCheck, Trash2, X } from "lucide-react";
 import { BridgePairingDialog } from "./BridgePairingDialog";
 import { ConnectivityWizard, sanitizeEndpoint } from "./ConnectivityWizard";
+import { JanjaBridgeTutorial } from "./JanjaBridgeTutorial";
 import type { ConnectivityRoute } from "../App";
 import { friendlyIpcError, rejectedIpcError } from "../ipcErrors";
 
@@ -91,7 +92,17 @@ const TABS: [Tab, string][] = [
   ["invites", "Convites"],
 ];
 
-export function ServerSettings({ server, onClose, initialTab = "members" }: { server: ServerState; onClose: () => void; initialTab?: Tab }) {
+const TAB_DESCRIPTIONS: Record<Tab, string> = {
+  members: "Pessoas e acesso",
+  roles: "Permissões",
+  channels: "Texto e voz",
+  hosts: "Dispositivos autorizados",
+  connectivity: "Acesso externo e TURN",
+  settings: "Privacidade e retenção",
+  invites: "Entradas da comunidade",
+};
+
+export function ServerSettings({ server, onClose, initialTab = "members", canConfigureConnectivity = true }: { server: ServerState; onClose: () => void; initialTab?: Tab; canConfigureConnectivity?: boolean }) {
   const [tab, setTab] = useState<Tab>(initialTab);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -104,6 +115,7 @@ export function ServerSettings({ server, onClose, initialTab = "members" }: { se
   const [newChannelName, setNewChannelName] = useState("");
   const [newChannelType, setNewChannelType] = useState<"text" | "call">("call");
   const [showBridgePairing, setShowBridgePairing] = useState(false);
+  const [showBridgeTutorial, setShowBridgeTutorial] = useState(false);
   const [showConnectivityWizard, setShowConnectivityWizard] = useState(false);
   const [bridges, setBridges] = useState<{ bridgeId: string; endpoint: string; expiresAt: number }[]>([]);
   const [backgroundHosting, setBackgroundHosting] = useState(false);
@@ -140,7 +152,7 @@ export function ServerSettings({ server, onClose, initialTab = "members" }: { se
   const nestedDialogOpenRef = useRef(false);
 
   closeRef.current = onClose;
-  nestedDialogOpenRef.current = showBridgePairing || showConnectivityWizard || Boolean(confirmRevoke);
+  nestedDialogOpenRef.current = showBridgePairing || showBridgeTutorial || showConnectivityWizard || Boolean(confirmRevoke);
 
   const currentRole = server.roles.find((role) => role.id === server.me.roleId);
   const canManageHosts = currentRole?.permissions.includes("manage_hosts") ?? false;
@@ -163,6 +175,15 @@ export function ServerSettings({ server, onClose, initialTab = "members" }: { se
     }
   };
   const loadConnectivity = async () => {
+    if (!canConfigureConnectivity) {
+      setBridges([]);
+      setBackgroundHosting(false);
+      setActiveRoute(null);
+      setTurnConfigured(false);
+      setConnectivityLoadError(null);
+      setConnectivityLoadState("ready");
+      return;
+    }
     setConnectivityLoadState("loading");
     setConnectivityLoadError(null);
     try {
@@ -275,7 +296,7 @@ export function ServerSettings({ server, onClose, initialTab = "members" }: { se
     if (tab === "connectivity") void loadConnectivity();
     if (tab === "hosts") void loadHosts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, [tab, canConfigureConnectivity]);
 
   useEffect(() => {
     previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -450,14 +471,14 @@ export function ServerSettings({ server, onClose, initialTab = "members" }: { se
   const isOwner = server.me.roleId === "role-owner";
 
   const moveTabFocus = (event: KeyboardEvent<HTMLButtonElement>, current: Tab) => {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
     const index = TABS.findIndex(([value]) => value === current);
     const nextIndex = event.key === "Home"
       ? 0
       : event.key === "End"
         ? TABS.length - 1
-        : (index + (event.key === "ArrowRight" ? 1 : -1) + TABS.length) % TABS.length;
+        : (index + (event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : -1) + TABS.length) % TABS.length;
     const nextTab = TABS[nextIndex]![0];
     setTab(nextTab);
     requestAnimationFrame(() => tabListRef.current?.querySelector<HTMLElement>(`#settings-tab-${nextTab}`)?.focus());
@@ -468,7 +489,7 @@ export function ServerSettings({ server, onClose, initialTab = "members" }: { se
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       data-smoke-screen="settings"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !showBridgePairing && !showConnectivityWizard) onClose();
+        if (event.target === event.currentTarget && !showBridgePairing && !showBridgeTutorial && !showConnectivityWizard) onClose();
       }}
     >
       <div
@@ -486,24 +507,27 @@ export function ServerSettings({ server, onClose, initialTab = "members" }: { se
             <X className="h-4 w-4" />
           </button>
         </div>
-        <div ref={tabListRef} role="tablist" aria-label="Seções de configuração" className="settings-tablist flex shrink-0 gap-1 overflow-x-auto border-b border-zinc-800 px-3 py-2">
-          {TABS.map(([t, label]) => (
-            <button
-              key={t}
-              id={`settings-tab-${t}`}
-              role="tab"
-              aria-selected={tab === t}
-              aria-controls="settings-tab-panel"
-              tabIndex={tab === t ? 0 : -1}
-              className={`rounded-md px-3 py-1 text-xs ${tab === t ? "bg-zinc-700 text-white" : "text-zinc-400 hover:bg-zinc-800"}`}
-              onClick={() => setTab(t)}
-              onKeyDown={(event) => moveTabFocus(event, t)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        <div id="settings-tab-panel" role="tabpanel" aria-labelledby={`settings-tab-${tab}`} tabIndex={0} className="min-h-0 flex-1 overflow-y-auto p-4 outline-none">
+        <div className="settings-layout flex min-h-0 flex-1">
+          <div ref={tabListRef} role="tablist" aria-label="Seções de configuração" className="settings-tablist flex w-52 shrink-0 flex-col gap-1 overflow-y-auto border-r border-zinc-800 p-2">
+            <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-500">Gerenciar comunidade</p>
+            {TABS.map(([t, label]) => (
+              <button
+                key={t}
+                id={`settings-tab-${t}`}
+                role="tab"
+                aria-selected={tab === t}
+                aria-controls="settings-tab-panel"
+                tabIndex={tab === t ? 0 : -1}
+                className={`rounded-lg px-3 py-2 text-left transition ${tab === t ? "bg-sky-500/15 text-white ring-1 ring-inset ring-sky-500/30" : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"}`}
+                onClick={() => setTab(t)}
+                onKeyDown={(event) => moveTabFocus(event, t)}
+              >
+                <span className="block text-xs font-medium">{label}</span>
+                <span className={`mt-0.5 block text-[10px] ${tab === t ? "text-sky-200/80" : "text-zinc-600"}`}>{TAB_DESCRIPTIONS[t]}</span>
+              </button>
+            ))}
+          </div>
+          <div id="settings-tab-panel" role="tabpanel" aria-labelledby={`settings-tab-${tab}`} tabIndex={0} className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 outline-none">
           {error && <p className="mb-2 text-xs text-red-400">{error}</p>}
           {actionSuccess && <p className="mb-2 text-xs text-emerald-400" role="status">{actionSuccess}</p>}
           {busy && (
@@ -716,7 +740,7 @@ export function ServerSettings({ server, onClose, initialTab = "members" }: { se
           )}
 
           {tab === "connectivity" && (
-            <div className="space-y-5">
+            canConfigureConnectivity ? <div className="space-y-5">
               <div className="settings-row flex items-start justify-between gap-4 border-b border-zinc-800 pb-4">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
@@ -726,13 +750,23 @@ export function ServerSettings({ server, onClose, initialTab = "members" }: { se
                   <p className="mt-1 text-xs leading-5 text-zinc-400">Publique este host com Tailscale, ngrok, Cloudflare ou domínio próprio.</p>
                   {!isOwner && <p className="mt-1 text-[11px] text-zinc-500">Somente o Owner pode alterar a rota pública da comunidade.</p>}
                 </div>
-                <button
-                  className="shrink-0 rounded-md bg-sky-600 px-3 py-2 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
-                  onClick={() => setShowConnectivityWizard(true)}
-                  disabled={!isOwner || connectivityLoadState === "loading"}
-                >
-                  Configurar conexão
-                </button>
+                <div className="flex shrink-0 flex-col items-end gap-2 sm:items-stretch">
+                  <button
+                    className="rounded-md bg-sky-600 px-3 py-2 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+                    onClick={() => setShowConnectivityWizard(true)}
+                    disabled={!isOwner || connectivityLoadState === "loading"}
+                  >
+                    Configurar conexão
+                  </button>
+                  <button
+                    className="inline-flex items-center justify-center gap-1.5 rounded-md border border-zinc-700 px-3 py-2 text-[11px] text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+                    onClick={() => setShowBridgeTutorial(true)}
+                    disabled={!isOwner}
+                  >
+                    <BookOpen className="h-3.5 w-3.5" aria-hidden />
+                    Tutorial servidor JanjaBridge
+                  </button>
+                </div>
               </div>
               {activeRoute && (
                 <div className="settings-row flex items-start justify-between gap-4 border-b border-zinc-800 pb-4">
@@ -832,10 +866,16 @@ export function ServerSettings({ server, onClose, initialTab = "members" }: { se
                     <p className="text-sm font-medium text-zinc-200">JanjaBridges</p>
                     <p className="mt-0.5 text-xs text-zinc-400">Até três rotas públicas para manter a comunidade alcançável.</p>
                   </div>
-                  <button className="flex items-center gap-1.5 rounded-md border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800" onClick={() => setShowBridgePairing(true)} disabled={connectivityLoadState === "loading"}>
-                    <Plus className="h-3.5 w-3.5" aria-hidden />
-                    Adicionar
-                  </button>
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <button className="flex items-center gap-1.5 rounded-md border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800" onClick={() => setShowBridgeTutorial(true)}>
+                      <BookOpen className="h-3.5 w-3.5" aria-hidden />
+                      Como hospedar
+                    </button>
+                    <button className="flex items-center gap-1.5 rounded-md border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800" onClick={() => setShowBridgePairing(true)} disabled={connectivityLoadState === "loading"}>
+                      <Plus className="h-3.5 w-3.5" aria-hidden />
+                      Já tenho pairing
+                    </button>
+                  </div>
                 </div>
                 <div className="mt-3 space-y-2">
                   {connectivityLoadState === "loading" && (
@@ -894,7 +934,20 @@ export function ServerSettings({ server, onClose, initialTab = "members" }: { se
                   }}
                 />
               </label>}
-            </div>
+            </div> : (
+              <div className="space-y-4">
+                <div className="rounded-xl border border-sky-500/20 bg-sky-500/5 p-4">
+                  <div className="flex items-start gap-3">
+                    <Network className="mt-0.5 h-5 w-5 shrink-0 text-sky-300" aria-hidden />
+                    <div>
+                      <p className="text-sm font-medium text-zinc-100">Acesso externo administrado pelo host</p>
+                      <p className="mt-1 text-xs leading-5 text-zinc-400">ngrok, Cloudflare, Tailscale e TURN precisam ser configurados no dispositivo que hospeda esta comunidade. As configurações de rede deste computador não alteram a disponibilidade dela.</p>
+                    </div>
+                  </div>
+                </div>
+                <p className="text-xs leading-5 text-zinc-500">Peça ao administrador um convite ou uma rota atualizada se a comunidade ficar inacessível.</p>
+              </div>
+            )
           )}
 
           {tab === "hosts" && (
@@ -1133,6 +1186,7 @@ export function ServerSettings({ server, onClose, initialTab = "members" }: { se
               ))}
             </div>
           )}
+          </div>
         </div>
       </div>
       {showConnectivityWizard && (
@@ -1140,8 +1194,10 @@ export function ServerSettings({ server, onClose, initialTab = "members" }: { se
           onClose={() => setShowConnectivityWizard(false)}
           onChanged={loadConnectivity}
           onOpenAdvanced={() => setShowBridgePairing(true)}
+          onOpenTutorial={() => setShowBridgeTutorial(true)}
         />
       )}
+      {showBridgeTutorial && <JanjaBridgeTutorial onClose={() => setShowBridgeTutorial(false)} onOpenPairing={() => { setShowBridgeTutorial(false); setShowBridgePairing(true); }} />}
       {showBridgePairing && <BridgePairingDialog onClose={() => setShowBridgePairing(false)} onAdded={loadConnectivity} />}
     </div>
   );

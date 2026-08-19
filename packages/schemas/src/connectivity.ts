@@ -55,7 +55,7 @@ const endpointSchema = z.string().min(1).max(2048).superRefine((value, ctx) => {
 });
 const iceCandidateSchema = z.string().min(1).max(4096);
 
-export const DirectRouteProviderSchema = z.enum(["tailscale", "ngrok", "cloudflare", "manual"]);
+export const DirectRouteProviderSchema = z.enum(["tailscale", "ngrok", "cloudflare", "zrok", "manual"]);
 export type DirectRouteProvider = z.infer<typeof DirectRouteProviderSchema>;
 
 export const DirectWssEndpointSchema = z.string().min(1).max(2048).superRefine((value, ctx) => {
