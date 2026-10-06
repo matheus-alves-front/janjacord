@@ -750,7 +750,7 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
                   <p className="mt-1 text-xs leading-5 text-zinc-500">Cole o convite que o administrador enviou para você.</p>
                 </div>
               </div>
-              <input id="invite-key" className="mt-4 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm outline-none focus:border-sky-500" placeholder="JC3-... ou JC2-..." value={joinKey} onChange={(event) => { setJoinKey(event.target.value); setLegacyChallenge(null); setJoinError(null); }} aria-invalid={Boolean(joinError)} aria-describedby={[joinError ? "invite-error" : null, legacyChallenge ? "legacy-fingerprint" : null].filter(Boolean).join(" ") || undefined} />
+              <input id="invite-key" className="mt-4 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm outline-none focus:border-sky-500" placeholder="JC4-..." value={joinKey} onChange={(event) => { setJoinKey(event.target.value); setLegacyChallenge(null); setJoinError(null); }} aria-invalid={Boolean(joinError)} aria-describedby={[joinError ? "invite-error" : null, legacyChallenge ? "legacy-fingerprint" : null].filter(Boolean).join(" ") || undefined} />
               {joinError && <p id="invite-error" className="mt-2 text-xs leading-5 text-red-400" role="alert">{joinError}</p>}
               {legacyChallenge && legacyChallenge.invite === joinKey.trim() && (
                 <div id="legacy-fingerprint" className="mt-3 rounded-lg border border-amber-800/60 bg-amber-950/30 p-3">
@@ -1037,6 +1037,7 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
             iceServers={callIceServers}
             connectionError={iceError}
             onRetryConnection={loadIceConfiguration}
+            onLeave={() => setChannelId(server?.channels.find((c) => c.type === "text")?.id ?? null)}
             callJoin={(cid) => window.janjacord.callJoin(cid)}
             callLeave={(cid) => window.janjacord.callLeave(cid)}
             callSignal={(cid, to, payload) => window.janjacord.callSignal(cid, to, payload)}

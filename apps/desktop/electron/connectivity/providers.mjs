@@ -505,6 +505,24 @@ export function createZrokProvider({ id, runner, baseEnvironment }) {
     }
   }
 
+  async function enableEnvironment(env, token, timeoutMs) {
+    try {
+      await runner.run("zrok2", ["enable", token, "--headless"], { env, timeoutMs });
+    } catch (error) {
+      const combined = `${String(error?.stderr ?? "")}\n${String(error?.stdout ?? "")}`;
+      throw new ProviderError(
+        id,
+        "zrok_token_required",
+        /401|403|unauthorized|invalid|unable to enable/i.test(combined)
+          ? "O Zrok não aceitou o authtoken informado. Confira o token na sua conta e tente novamente."
+          : "Não foi possível habilitar o ambiente Zrok. Verifique sua conexão e tente novamente.",
+      );
+    }
+    if (!(await environmentEnabled(env, timeoutMs))) {
+      throw new ProviderError(id, "zrok_env_not_enabled", "O ambiente Zrok não ficou habilitado após o enable. Reinicie o app e tente novamente.");
+    }
+  }
+
   async function startShare(env, name, timeoutMs) {
     const result = await runner.run(
       "zrok2",
@@ -547,7 +565,7 @@ export function createZrokProvider({ id, runner, baseEnvironment }) {
       });
     },
     async start(options = {}) {
-      const input = assertPlainOptions(options, ["env", "name", "startupTimeoutMs"]);
+      const input = assertPlainOptions(options, ["env", "name", "token", "startupTimeoutMs"]);
       const env = buildEnvironment(baseEnvironment, input.env);
       const timeoutMs = startupTimeout(input.startupTimeoutMs);
       const name = typeof input.name === "string" ? input.name.trim().toLowerCase() : "";
@@ -557,7 +575,11 @@ export function createZrokProvider({ id, runner, baseEnvironment }) {
       let owned = false;
       try {
         if (!(await environmentEnabled(env, timeoutMs))) {
-          throw new ProviderError(id, "zrok_env_not_enabled", "O ambiente Zrok não está habilitado nesta máquina. Rode `zrok2 enable <token> --headless` no terminal e tente novamente.");
+          const token = typeof input.token === "string" ? input.token.trim() : "";
+          if (!token) {
+            throw new ProviderError(id, "zrok_token_required", "O ambiente Zrok não está habilitado. Informe o authtoken da sua conta Zrok para o app habilitar automaticamente.");
+          }
+          await enableEnvironment(env, token, timeoutMs);
         }
         const agent = await ensureAgent(env, timeoutMs);
         owned = agent.owned;

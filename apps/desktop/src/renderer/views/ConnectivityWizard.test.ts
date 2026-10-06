@@ -24,6 +24,7 @@ describe("connectivity provider configuration", () => {
     expect(buildProviderConfig("manual", { ...emptyForm, domain: " Host.Example.com. " })).toEqual({ domain: "host.example.com" });
     expect(buildProviderConfig("zrok", { ...emptyForm, domain: "Meu-Servidor" })).toEqual({ name: "meu-servidor" });
     expect(buildProviderConfig("zrok", emptyForm)).toEqual({});
+    expect(buildProviderConfig("zrok", { ...emptyForm, domain: "Meu-Servidor", token: " zrok-secret " })).toEqual({ name: "meu-servidor", token: "zrok-secret" });
   });
 
   it("removes secrets from form state immediately after submission", () => {
@@ -57,7 +58,11 @@ describe("connectivity provider configuration", () => {
     expect(providerBlockReason(
       { id: "zrok", installed: true, enabled: false },
       { ...emptyForm, domain: "meu-servidor" },
-    )).toMatch(/habilite o ambiente zrok/i);
+    )).toMatch(/authtoken/i);
+    expect(providerBlockReason(
+      { id: "zrok", installed: true, enabled: false },
+      { ...emptyForm, domain: "meu-servidor", token: "zrok-secret" },
+    )).toBeNull();
     expect(providerBlockReason(
       { id: "zrok", installed: true, enabled: true },
       emptyForm,

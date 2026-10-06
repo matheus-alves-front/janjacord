@@ -462,14 +462,43 @@ describe("zrok adapter", () => {
     expect(execFile.calls.some(({ command, args }) => command === "zrok2" && args[0] === "delete" && args[2] === "abc123")).toBe(true);
   });
 
-  it("fails with zrok_env_not_enabled before spawning anything", async () => {
+  it("fails with zrok_token_required before spawning anything when the environment is disabled and no token is supplied", async () => {
     const execFile = fakeExecFile({ "zrok2 status": { stdout: STATUS_DISABLED } });
     const spawn = fakeSpawn();
     const registry = createProviderRegistry({ spawn, execFile });
 
-    await expect(registry.start(PROVIDER_IDS.ZROK, { name: "meu-servidor" })).rejects.toMatchObject({ code: "zrok_env_not_enabled" });
+    await expect(registry.start(PROVIDER_IDS.ZROK, { name: "meu-servidor" })).rejects.toMatchObject({ code: "zrok_token_required" });
     expect(spawn.calls).toEqual([]);
     expect(execFile.calls.map(({ command, args }) => [command, args])).toEqual([["zrok2", ["status"]]]);
+  });
+
+  it("enables the environment from a supplied authtoken and then publishes the share", async () => {
+    const execFile = fakeExecFile({
+      "zrok2 status": [{ stdout: STATUS_DISABLED }, { stdout: STATUS_ENABLED }],
+      "zrok2 enable meu-token-zrok --headless": { stdout: "environment enabled" },
+      "zrok2 agent status": { stdout: AGENT_WITH_SHARE },
+      "zrok2 create name -n public meu-servidor": { stdout: "created name 'meu-servidor' in namespace 'public'" },
+      "zrok2 share public 127.0.0.1:8931 -n public:meu-servidor --open --headless": { stdout: SHARE_OUTPUT },
+    });
+    const spawn = fakeSpawn();
+    const registry = createProviderRegistry({ spawn, execFile });
+
+    const started = await registry.start(PROVIDER_IDS.ZROK, { name: "meu-servidor", token: "meu-token-zrok", startupTimeoutMs: 5_000 });
+    expect(started).toMatchObject({ state: "running", endpoint: "wss://meu-servidor.shares.zrok.io/" });
+    expect(execFile.calls.some(({ command, args }) => command === "zrok2" && args[0] === "enable" && args[1] === "meu-token-zrok")).toBe(true);
+    await registry.stop(PROVIDER_IDS.ZROK);
+  });
+
+  it("fails with zrok_token_required when the authtoken is rejected by zrok", async () => {
+    const rejected = Object.assign(new Error("denied"), { code: 1, stderr: "[ERROR]: unable to enable (401 unauthorized)" });
+    const execFile = fakeExecFile({
+      "zrok2 status": { stdout: STATUS_DISABLED },
+      "zrok2 enable token-errado --headless": rejected,
+    });
+    const registry = createProviderRegistry({ spawn: fakeSpawn(), execFile });
+
+    await expect(registry.start(PROVIDER_IDS.ZROK, { name: "meu-servidor", token: "token-errado" }))
+      .rejects.toMatchObject({ code: "zrok_token_required" });
   });
 
   it("rejects an invalid share name before running commands", async () => {

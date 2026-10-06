@@ -433,7 +433,7 @@ function parsePersistedProviderSettings(value, provider) {
 }
 
 function normalizeStoredSecret(key, secret) {
-  if (["ngrok", "cloudflare"].includes(key)) {
+  if (["ngrok", "cloudflare", "zrok"].includes(key)) {
     return typeof secret === "string" && secret.length >= 8 && secret.length <= 4096 ? secret : undefined;
   }
   if (key === "cloudflareTurn") {
@@ -591,7 +591,7 @@ function normalizeProviderStartInput(provider, value) {
   }
   const allowed = provider === "cloudflare" ? ["mode", "token", "hostname"]
     : provider === "ngrok" ? ["token"] : provider === "manual" ? ["domain"]
-      : provider === "zrok" ? ["name"] : [];
+      : provider === "zrok" ? ["name", "token"] : [];
   if (Object.keys(value).some((key) => !allowed.includes(key))) {
     throw Object.assign(new Error("configuração de conexão contém campos desconhecidos"), { code: "invalid_input" });
   }
@@ -2633,10 +2633,11 @@ function registerIpc() {
       const secrets = readProviderSecrets();
       if (input.provider === "ngrok" && input.token) secrets.ngrok = input.token;
       if (input.provider === "cloudflare" && input.mode === "named" && input.token) secrets.cloudflare = input.token;
+      if (input.provider === "zrok" && input.token) secrets.zrok = input.token;
       if (input.provider === "cloudflare" && input.mode === "named" && !secrets.cloudflare) {
         return { ok: false, error: { code: "auth_required", message: "Informe o token do Cloudflare Tunnel." } };
       }
-      if ((input.provider === "ngrok" && input.token) || (input.provider === "cloudflare" && input.mode === "named" && input.token)) {
+      if ((input.provider === "ngrok" && input.token) || (input.provider === "cloudflare" && input.mode === "named" && input.token) || (input.provider === "zrok" && input.token)) {
         writeProviderSecrets(secrets);
       }
 
@@ -2649,7 +2650,7 @@ function registerIpc() {
             : input.provider === "manual"
               ? { endpoint: `wss://${input.domain}/` }
               : input.provider === "zrok"
-                ? { name: input.name, startupTimeoutMs: 45_000 }
+                ? { name: input.name, ...(input.token ? { token: input.token } : {}), startupTimeoutMs: 45_000 }
                 : { startupTimeoutMs: 45_000 };
       const started = await connectivityProviders.start(runtimeId, options);
       if (input.provider === "manual" && started.nginxConfig) {

@@ -61,7 +61,8 @@ const CONNECTIVITY_ERRORS: Record<string, string> = {
   tailscale_funnel_disabled: "O Funnel não está habilitado na sua conta Tailscale. Habilite em https://login.tailscale.com/f/funnel e tente novamente.",
   tailscale_needs_login: "Entre no Tailscale (app ou `tailscale up`) antes de ativar o Funnel.",
   tailscale_offline: "O Tailscale não está conectado nesta máquina. Conecte-se e tente novamente.",
-  zrok_env_not_enabled: "O ambiente Zrok não está habilitado. No terminal, rode `zrok2 enable <token> --headless` e tente novamente.",
+  zrok_env_not_enabled: "O ambiente Zrok não ficou habilitado após o enable. Confira o authtoken e tente novamente.",
+  zrok_token_required: "Informe o authtoken da sua conta Zrok para o app habilitar o ambiente automaticamente.",
   zrok_name_conflict: "Não foi possível reservar o nome da rota Zrok. Use outro nome e tente novamente.",
   invalid_name: "O nome da rota Zrok é inválido. Use minúsculas, números e hífens.",
   turn_auth_failed: "As credenciais do TURN da Cloudflare foram rejeitadas. Confira TURN Key ID e API token.",
@@ -111,7 +112,7 @@ const PROVIDERS: Record<ConnectivityProviderId, ProviderPresentation> = {
     label: "Zrok",
     eyebrow: "Sem abrir portas",
     summary: "Publica o host por HTTPS/WSS com endpoint estável, sem abrir portas ou configurar VPS.",
-    prerequisite: "zrok2 instalado e ambiente habilitado (`zrok2 enable <token>` no terminal). O túnel é um terceiro no transporte; não substitui TURN nem JanjaBridge.",
+    prerequisite: "zrok2 instalado; a conta Zrok é conectada aqui mesmo com o authtoken, sem terminal. O túnel é um terceiro no transporte; não substitui TURN nem JanjaBridge.",
     Icon: Radio,
   },
 };
@@ -148,7 +149,12 @@ export function buildProviderConfig(provider: ConnectivityProviderId, form: Prov
     return { mode: "named", ...(token ? { token } : {}), ...(domain ? { hostname: domain } : {}) };
   }
   if (provider === "manual") return { domain };
-  if (provider === "zrok") return domain ? { name: domain } : {};
+  if (provider === "zrok") {
+    const config: Record<string, string | boolean> = {};
+    if (domain) config.name = domain;
+    if (token) config.token = token;
+    return config;
+  }
   return {};
 }
 
@@ -174,7 +180,7 @@ export function providerBlockReason(provider: ConnectivityProvider, form: Provid
   if (provider.id === "tailscale" && provider.authenticated === false) return "Entre no Tailscale antes de ativar o Funnel.";
   if (provider.id === "ngrok" && provider.authenticated === false && !form.token.trim()) return "Informe o authtoken ou autentique o agente ngrok.";
   if (provider.id === "cloudflare" && form.cloudflareMode === "named" && provider.authenticated !== true && !form.token.trim()) return "Informe o token do túnel nomeado.";
-  if (provider.id === "zrok" && provider.enabled === false) return "Habilite o ambiente Zrok antes de ativar a rota: no terminal, rode `zrok2 enable <token> --headless`.";
+  if (provider.id === "zrok" && provider.enabled === false && !form.token.trim()) return "Informe o authtoken da sua conta Zrok para habilitar o ambiente aqui mesmo, sem terminal.";
   if (provider.id === "zrok" && !isValidZrokName(form.domain)) return "Informe um nome para a rota (minúsculas, números e hífens; sem domínio completo).";
   if ((provider.id === "cloudflare" && form.cloudflareMode === "named") || provider.id === "manual") {
     if (!isValidHostname(form.domain)) return "Informe somente um domínio válido, sem https:// ou caminho.";
@@ -668,10 +674,22 @@ export function ConnectivityWizard({
                       />
                     </label>
                     {selected.enabled === false ? (
-                      <p className="flex items-start gap-2 text-xs leading-5 text-amber-200">
-                        <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-                        O ambiente Zrok ainda não está habilitado. No terminal, rode <code className="rounded bg-zinc-800 px-1">zrok2 enable &lt;token&gt; --headless</code> e volte para detectar.
-                      </p>
+                      <div className="space-y-2">
+                        <label className="block text-xs font-medium text-zinc-300" htmlFor="connectivity-zrok-token">
+                          Authtoken da conta Zrok <span className="font-normal text-zinc-500">(o app habilita o ambiente pra você, sem terminal)</span>
+                          <input
+                            id="connectivity-zrok-token"
+                            type="password"
+                            autoComplete="off"
+                            spellCheck={false}
+                            className="mt-2 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-sky-500"
+                            value={form.token}
+                            onChange={(event) => { setForm((current) => ({ ...current, token: event.target.value })); setError(null); }}
+                            placeholder="Cole o authtoken da sua conta Zrok"
+                          />
+                        </label>
+                        <p className="text-[11px] leading-4 text-zinc-500">Você consegue o authtoken na sua conta Zrok. Ele fica guardado no cofre seguro do sistema e não é exibido de novo.</p>
+                      </div>
                     ) : (
                       <p className="flex items-start gap-2 text-xs leading-5 text-zinc-400">
                         <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />

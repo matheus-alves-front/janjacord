@@ -31,6 +31,7 @@ export class MeshCall {
   private peers = new Map<string, RTCPeerConnection>();
   private streams = new Map<string, MediaStream>();
   private readonly opts: MeshCallOptions;
+  private deafened = false;
   localStream: MediaStream | null = null;
 
   constructor(opts: MeshCallOptions) {
@@ -57,6 +58,7 @@ export class MeshCall {
       if (!peerId) return;
       const stream = e.streams[0] ?? new MediaStream([e.track]);
       this.streams.set(peerId, stream);
+      if (this.deafened) stream.getAudioTracks().forEach((t) => (t.enabled = false));
       this.opts.onRemoteStream(peerId, stream);
     };
     return pc;
@@ -78,6 +80,14 @@ export class MeshCall {
 
   setMicEnabled(audio: boolean): void {
     this.localStream?.getAudioTracks().forEach((t) => (t.enabled = audio));
+  }
+
+  /** Deafen: silencia o áudio recebido de todos os peers (mic local inalterado). */
+  setDeafened(deafened: boolean): void {
+    this.deafened = deafened;
+    for (const stream of this.streams.values()) {
+      stream.getAudioTracks().forEach((t) => (t.enabled = !deafened));
+    }
   }
 
   /** Cria PC com um peer e envia offer (o chamador faz offer). */

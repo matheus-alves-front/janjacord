@@ -147,3 +147,33 @@ describe("MeshCall signaling validation", () => {
     expect(pc.addIceCandidate).not.toHaveBeenCalled();
   });
 });
+
+describe("MeshCall deafen", () => {
+  it("silences received audio tracks and keeps future peers muted while deafened", async () => {
+    const remoteStreams: MediaStream[] = [];
+    const mesh = new MeshCall({
+      selfId: "alice",
+      sendSignal: vi.fn(),
+      onRemoteStream: (_peerId, stream) => remoteStreams.push(stream),
+      onPeerLeft: vi.fn(),
+    });
+
+    const bobTrack = { enabled: true };
+    const bobStream = { getAudioTracks: () => [bobTrack] } as unknown as MediaStream;
+    await mesh.connectTo("bob");
+    FakePeerConnection.instances[0]!.ontrack?.({ streams: [bobStream] } as unknown as RTCTrackEvent);
+
+    mesh.setDeafened(true);
+    expect(bobTrack.enabled).toBe(false);
+
+    const carolTrack = { enabled: true };
+    const carolStream = { getAudioTracks: () => [carolTrack] } as unknown as MediaStream;
+    await mesh.handleSignal({ from: "carol", payload: { type: "offer", sdp: SDP } });
+    FakePeerConnection.instances[1]!.ontrack?.({ streams: [carolStream] } as unknown as RTCTrackEvent);
+    expect(carolTrack.enabled).toBe(false);
+
+    mesh.setDeafened(false);
+    expect(bobTrack.enabled).toBe(true);
+    expect(carolTrack.enabled).toBe(true);
+  });
+});

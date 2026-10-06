@@ -1,6 +1,7 @@
 {
   "name": "@janjacord/desktop",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "Desktop self-hosted para comunidades JanjaCord",
   "author": {
     "name": "JanjaCord contributors",

@@ -2,6 +2,7 @@
   "name": "janjacord",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
   "description": "JanjaCord — comunicador privado de comunidades, invite-only, E2EE, efemero, user-hosted",
   "packageManager": "pnpm@10.25.0",
   "engines": {

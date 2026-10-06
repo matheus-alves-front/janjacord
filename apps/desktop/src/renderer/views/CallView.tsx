@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { LoaderCircle, RefreshCw } from "lucide-react";
+import { LoaderCircle, Mic, MicOff, PhoneOff, RefreshCw, Video, VideoOff, Volume2, VolumeX } from "lucide-react";
 import { MeshCall, type CallSignal } from "../webrtc";
 
 interface CallViewProps {
@@ -10,6 +10,8 @@ interface CallViewProps {
   iceServers?: RTCIceServer[];
   connectionError?: string | null;
   onRetryConnection?: () => Promise<void> | void;
+  /** Sai da call de verdade: o pai troca de canal e o cleanup encerra peer connections. */
+  onLeave: () => void;
   /** IPC exposto via preload — call signaling. */
   callJoin: (channelId: string) => Promise<{ ok: boolean; data?: { participants: string[] }; error?: { message: string } }>;
   callLeave: (channelId: string) => Promise<unknown>;
@@ -17,12 +19,13 @@ interface CallViewProps {
   onSignal: (cb: (signal: CallSignal) => void) => void;
 }
 
-export function CallView({ channelId, members, selfId, networkPrivacy, iceServers, connectionError, onRetryConnection, callJoin, callLeave, callSignal, onSignal }: CallViewProps) {
+export function CallView({ channelId, members, selfId, networkPrivacy, iceServers, connectionError, onRetryConnection, onLeave, callJoin, callLeave, callSignal, onSignal }: CallViewProps) {
   const meshRef = useRef<MeshCall | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
   const [peers, setPeers] = useState<string[]>([]);
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
+  const [deafened, setDeafened] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [loading, setLoading] = useState(true);
@@ -107,8 +110,10 @@ export function CallView({ channelId, members, selfId, networkPrivacy, iceServer
         {/* local preview */}
         <div className="relative overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900">
           <video ref={videoRef(localStream)} autoPlay muted playsInline className="h-full w-full object-cover" />
-          <span className="absolute bottom-2 left-2 rounded bg-black/60 px-2 py-0.5 text-[11px] text-white">
-            você {micOn ? "🎙" : "🔇"} {camOn ? "" : "🚫"}
+          <span className="absolute bottom-2 left-2 flex items-center gap-1.5 rounded bg-black/60 px-2 py-0.5 text-[11px] text-white">
+            você
+            {micOn ? <Mic className="h-3 w-3" aria-label="Microfone ligado" /> : <MicOff className="h-3 w-3 text-red-400" aria-label="Microfone desligado" />}
+            {camOn ? <Video className="h-3 w-3" aria-label="Câmera ligada" /> : <VideoOff className="h-3 w-3 text-red-400" aria-label="Câmera desligada" />}
           </span>
         </div>
         {/* remotos */}
@@ -147,32 +152,51 @@ export function CallView({ channelId, members, selfId, networkPrivacy, iceServer
       )}
       <div className="flex items-center justify-center gap-3 border-t border-zinc-800 p-3">
         <button
-          className={`h-11 w-11 rounded-full text-lg ${micOn ? "bg-zinc-800 hover:bg-zinc-700" : "bg-red-600 hover:bg-red-500"}`}
+          className={`flex h-11 w-11 items-center justify-center rounded-full ${micOn ? "bg-zinc-800 text-zinc-100 hover:bg-zinc-700" : "bg-red-600 text-white hover:bg-red-500"}`}
           onClick={() => {
             const next = !micOn;
             setMicOn(next);
             meshRef.current?.setMicEnabled(next);
           }}
-          title="Microfone"
+          title={micOn ? "Desligar microfone" : "Ligar microfone"}
+          aria-pressed={!micOn}
+          aria-label={micOn ? "Desligar microfone" : "Ligar microfone"}
         >
-          {micOn ? "🎙" : "🔇"}
+          {micOn ? <Mic className="h-5 w-5" aria-hidden /> : <MicOff className="h-5 w-5" aria-hidden />}
         </button>
         <button
-          className={`h-11 w-11 rounded-full text-lg ${camOn ? "bg-zinc-800 hover:bg-zinc-700" : "bg-zinc-600"}`}
+          className={`flex h-11 w-11 items-center justify-center rounded-full ${camOn ? "bg-zinc-800 text-zinc-100 hover:bg-zinc-700" : "bg-red-600 text-white hover:bg-red-500"}`}
           onClick={() => {
             const next = !camOn;
             setCamOn(next);
             meshRef.current?.setVideoEnabled(next);
           }}
-          title="Câmera"
+          title={camOn ? "Desligar câmera" : "Ligar câmera"}
+          aria-pressed={!camOn}
+          aria-label={camOn ? "Desligar câmera" : "Ligar câmera"}
         >
-          🎥
+          {camOn ? <Video className="h-5 w-5" aria-hidden /> : <VideoOff className="h-5 w-5" aria-hidden />}
         </button>
         <button
-          className="h-11 rounded-full bg-red-600 px-5 text-sm font-medium text-white hover:bg-red-500"
-          onClick={() => meshRef.current?.localStream?.getAudioTracks().forEach((t) => (t.enabled = false))}
-          title="Sair"
+          className={`flex h-11 w-11 items-center justify-center rounded-full ${deafened ? "bg-red-600 text-white hover:bg-red-500" : "bg-zinc-800 text-zinc-100 hover:bg-zinc-700"}`}
+          onClick={() => {
+            const next = !deafened;
+            setDeafened(next);
+            meshRef.current?.setDeafened(next);
+          }}
+          title={deafened ? "Religar áudio dos outros" : "Silenciar áudio dos outros (deafen)"}
+          aria-pressed={deafened}
+          aria-label={deafened ? "Religar áudio dos outros" : "Silenciar áudio dos outros"}
         >
+          {deafened ? <VolumeX className="h-5 w-5" aria-hidden /> : <Volume2 className="h-5 w-5" aria-hidden />}
+        </button>
+        <button
+          className="flex h-11 items-center justify-center gap-2 rounded-full bg-red-600 px-5 text-sm font-medium text-white hover:bg-red-500"
+          onClick={onLeave}
+          title="Sair da chamada"
+          aria-label="Sair da chamada"
+        >
+          <PhoneOff className="h-4 w-4" aria-hidden />
           Sair
         </button>
       </div>
