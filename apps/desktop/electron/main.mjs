@@ -2063,6 +2063,9 @@ function registerIpc() {
 
     // JC4: rotas diretas WSS primeiro, com a host key pinada (o challenge do host precisa
     // provar exatamente a chave assinada no hint; HostClient falha fechado em mismatch).
+    // Redes remotas (4G/WAN) acumulam DNS+TCP+TLS+WS+challenge através do edge do provedor;
+    // 5s estourava antes do handshake completar, então o join usa orçamento próprio.
+    let lastDirectRouteError = null;
     if (parsedV4) {
       for (const hint of parsedV4.payload.directRouteHints) {
         const routeUrl = typeof hint.payload.endpoint === "string" ? hint.payload.endpoint : "";
@@ -2073,13 +2076,18 @@ function registerIpc() {
             authorityFingerprint: parsedV4.payload.authorityFingerprint,
             expectedHostPublicKey: hint.payload.hostPublicKey,
             expectedHostId: hint.payload.hostId,
-          });
+          }, 15_000);
           if (connected) {
             target = null;
+            lastDirectRouteError = null;
             break;
           }
-        } catch {
-          // tenta a próxima rota; todas as falhas caem no rendezvous de bridges
+          lastDirectRouteError = { code: "timeout", message: "rota direta não abriu no tempo esperado" };
+        } catch (error) {
+          lastDirectRouteError = {
+            code: typeof error?.code === "string" && error.code ? error.code : "network_error",
+            message: "rota direta falhou antes do handshake completar",
+          };
         }
       }
     }
@@ -2181,7 +2189,9 @@ function registerIpc() {
         return { ok: false, error: { code: "rendezvous", message: `falha no rendezvous: ${(e).message}` } };
       }
     } else if (parsedV4 || parsedV3) {
-      return { ok: false, error: { code: "rendezvous", message: "invite sem JanjaBridge alcançável" } };
+      // Sem bridges no convite, o motivo real da rota direta é o que importa — não mascarar
+      // timeout/rede como se fosse problema de rendezvous.
+      return { ok: false, error: lastDirectRouteError ?? { code: "rendezvous", message: "invite sem JanjaBridge alcançável" } };
     }
     if (target && isLegacy) {
       const connectivity = readConnectivityConfig();
