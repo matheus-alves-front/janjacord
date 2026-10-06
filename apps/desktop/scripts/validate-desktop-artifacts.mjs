@@ -188,7 +188,9 @@ function validateNoGlobalHooks() {
 
 function requireAsarEntries(entries, label) {
   for (const required of ["/electron/main.mjs", "/electron/preload.cjs", "/dist/index.html", `/dist/${SOURCE_MANIFEST_FILENAME}`, "/package.json"]) {
-    if (!entries.includes(required)) fail(`${label} app.asar is missing ${required}`);
+    if (!entries.includes(required)) {
+      fail(`${label} app.asar is missing ${required}; packed entries include: ${entries.slice(0, 60).join(", ")}`);
+    }
   }
 }
 
@@ -197,7 +199,12 @@ function validateAsar(asarPath, label, asarCli) {
   const size = statSync(asarPath).size;
   if (size < 1024 * 1024) fail(`${label} app.asar is implausibly small (${size} bytes)`);
   if (size > 160 * 1024 * 1024) fail(`${label} app.asar exceeds 160 MiB (${size} bytes)`);
-  const entries = run(process.execPath, [asarCli, "list", asarPath]).split("\n");
+  // Empacotamento no Windows pode listar entradas com separador nativo; asar keys canônicas
+  // usam "/", então a comparação normaliza antes de validar conteúdo.
+  const entries = run(process.execPath, [asarCli, "list", asarPath])
+    .split("\n")
+    .filter((entry) => entry.length > 0)
+    .map((entry) => entry.replace(/\\/g, "/"));
   requireAsarEntries(entries, label);
   for (const forbidden of [/\/node_modules\/@janjacord\/[^/]+\/src\//, /\/node_modules\/@janjacord\/[^/]+\/scripts\//, /\.test\./, /\/node_modules\/@janjacord\/[^/]+\/target\//, /\.map$/]) {
     if (entries.some((entry) => forbidden.test(entry))) fail(`${label} app.asar contains excluded content matching ${forbidden}`);
