@@ -524,11 +524,20 @@ export function createZrokProvider({ id, runner, baseEnvironment }) {
   }
 
   async function startShare(env, name, timeoutMs) {
-    const result = await runner.run(
-      "zrok2",
-      ["share", "public", `127.0.0.1:${LOCAL_PORT}`, "-n", `public:${name}`, "--open", "--headless"],
-      { env, timeoutMs },
-    );
+    let result;
+    try {
+      result = await runner.run(
+        "zrok2",
+        ["share", "public", `127.0.0.1:${LOCAL_PORT}`, "-n", `public:${name}`, "--open", "--headless"],
+        { env, timeoutMs },
+      );
+    } catch (error) {
+      const combined = `${String(error?.stderr ?? "")}\n${String(error?.stdout ?? "")}`;
+      if (/shareConflict|already in use by another share/i.test(combined)) {
+        throw new ProviderError(id, "zrok_route_name_busy", `O nome '${name}' está preso por uma share antiga na sua conta Zrok. Escolha outro nome para a rota.`);
+      }
+      throw error;
+    }
     const text = `${result.stdout}\n${result.stderr}`;
     const host = zrokShareEndpointFromOutput(text);
     if (!host) throw new ProviderError(id, "endpoint_missing", "Zrok did not report a usable public endpoint.");

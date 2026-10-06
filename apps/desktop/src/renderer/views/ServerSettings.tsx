@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { BookOpen, HardDrive, KeyRound, Link2, LoaderCircle, Network, Plus, RefreshCw, ShieldCheck, Trash2, X } from "lucide-react";
+import { Activity, BookOpen, Check, HardDrive, KeyRound, Link2, LoaderCircle, Network, Plus, RefreshCw, ShieldCheck, Trash2, TriangleAlert, X, XCircle } from "lucide-react";
 import { BridgePairingDialog } from "./BridgePairingDialog";
 import { ConnectivityWizard, sanitizeEndpoint } from "./ConnectivityWizard";
 import { JanjaBridgeTutorial } from "./JanjaBridgeTutorial";
-import type { ConnectivityRoute } from "../App";
+import type { ConnectivityDoctorReport, ConnectivityRoute } from "../App";
 import { friendlyIpcError, rejectedIpcError } from "../ipcErrors";
 
 interface Member {
@@ -102,7 +102,7 @@ const TAB_DESCRIPTIONS: Record<Tab, string> = {
   invites: "Entradas da comunidade",
 };
 
-export function ServerSettings({ server, onClose, initialTab = "members", canConfigureConnectivity = true }: { server: ServerState; onClose: () => void; initialTab?: Tab; canConfigureConnectivity?: boolean }) {
+export function ServerSettings({ server, onClose, initialTab = "members", canConfigureConnectivity = true, communityName }: { server: ServerState; onClose: () => void; initialTab?: Tab; canConfigureConnectivity?: boolean; communityName?: string }) {
   const [tab, setTab] = useState<Tab>(initialTab);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -133,6 +133,9 @@ export function ServerSettings({ server, onClose, initialTab = "members", canCon
   const [connectivityLoadState, setConnectivityLoadState] = useState<LoadState>("idle");
   const [connectivityLoadError, setConnectivityLoadError] = useState<string | null>(null);
   const [hostsState, setHostsState] = useState<LoadState>("idle");
+  const [doctorState, setDoctorState] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [doctorReport, setDoctorReport] = useState<ConnectivityDoctorReport | null>(null);
+  const [doctorError, setDoctorError] = useState<string | null>(null);
   const [hostsError, setHostsError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   const [confirmGrant, setConfirmGrant] = useState<HostGrant | null>(null);
@@ -238,6 +241,25 @@ export function ServerSettings({ server, onClose, initialTab = "members", canCon
       setTurnError(rejectedIpcError(error, "Não foi possível remover o TURN."));
     } finally {
       setTurnBusy(false);
+    }
+  };
+
+  const runConnectivityDoctor = async () => {
+    setDoctorState("running");
+    setDoctorError(null);
+    setDoctorReport(null);
+    try {
+      const result = await window.janjacord.connectivityDoctor();
+      if (!result.ok || !result.data) {
+        setDoctorError(friendlyIpcError(result.error, "Não foi possível concluir o diagnóstico."));
+        setDoctorState("error");
+        return;
+      }
+      setDoctorReport(result.data);
+      setDoctorState("done");
+    } catch (error) {
+      setDoctorError(rejectedIpcError(error, "Não foi possível concluir o diagnóstico."));
+      setDoctorState("error");
     }
   };
 
@@ -794,6 +816,51 @@ export function ServerSettings({ server, onClose, initialTab = "members", canCon
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
+                      <Activity className="h-4 w-4 shrink-0 text-emerald-400" aria-hidden />
+                      <p className="text-sm font-medium text-zinc-200">Diagnóstico de conexão</p>
+                    </div>
+                    <p className="mt-1 text-xs leading-5 text-zinc-400">Testa o servidor local, a rota publicada e o alcance pela internet — em segundos, sem terminal.</p>
+                  </div>
+                  <button
+                    className="shrink-0 rounded-md border border-emerald-800 px-3 py-2 text-xs text-emerald-300 hover:bg-emerald-950/40 disabled:opacity-40"
+                    onClick={() => void runConnectivityDoctor()}
+                    disabled={doctorState === "running"}
+                  >
+                    {doctorState === "running" ? <LoaderCircle className="mr-1 inline h-3.5 w-3.5 animate-spin" aria-hidden /> : null}
+                    {doctorState === "running" ? "Testando..." : "Diagnosticar agora"}
+                  </button>
+                </div>
+                {doctorState === "done" && doctorReport && (
+                  <div className="mt-3 space-y-2" role="status">
+                    {doctorReport.checks.map((check) => (
+                      <div key={check.id} className="flex items-start justify-between gap-3 rounded-md border border-zinc-800 bg-zinc-950/50 px-3 py-2">
+                        <span className="flex min-w-0 items-start gap-2">
+                          {check.ok ? <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" aria-hidden /> : <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" aria-hidden />}
+                          <span className="min-w-0">
+                            <span className="block text-xs font-medium text-zinc-200">{check.label}</span>
+                            <span className="block break-all text-[11px] leading-4 text-zinc-500">{check.detail}</span>
+                          </span>
+                        </span>
+                      </div>
+                    ))}
+                    {doctorReport.hints.length > 0 && (
+                      <div className="rounded-md border border-amber-900/60 bg-amber-950/30 px-3 py-2" role="alert">
+                        {doctorReport.hints.map((hint) => (
+                          <p key={hint} className="flex items-start gap-2 text-xs leading-5 text-amber-200"><TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />{hint}</p>
+                        ))}
+                      </div>
+                    )}
+                    {doctorReport.overall === "ok" && <p className="text-xs leading-5 text-emerald-300">Tudo certo por aqui — o problema, se houver, está na rede ou no dispositivo de quem entra.</p>}
+                  </div>
+                )}
+                {doctorState === "error" && doctorError && (
+                  <p className="mt-3 flex items-start gap-2 text-xs leading-5 text-red-400" role="alert"><TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />{doctorError}</p>
+                )}
+              </div>
+              <div className="settings-row border-b border-zinc-800 pb-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
                       <KeyRound className="h-4 w-4 shrink-0 text-sky-400" aria-hidden />
                       <p className="text-sm font-medium text-zinc-200">Voz e vídeo: TURN gratuito</p>
                     </div>
@@ -1195,6 +1262,7 @@ export function ServerSettings({ server, onClose, initialTab = "members", canCon
           onChanged={loadConnectivity}
           onOpenAdvanced={() => setShowBridgePairing(true)}
           onOpenTutorial={() => setShowBridgeTutorial(true)}
+          suggestedRouteName={communityName}
         />
       )}
       {showBridgeTutorial && <JanjaBridgeTutorial onClose={() => setShowBridgeTutorial(false)} onOpenPairing={() => { setShowBridgeTutorial(false); setShowBridgePairing(true); }} />}

@@ -35,6 +35,9 @@ import {
 import { createCipheriv, createDecipheriv, createHash, createHmac, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { durableAtomicWrite, ensureEncryptedDatabaseKey } from "./primary-host-profile.mjs";
 import { createProviderRegistry, PROVIDER_IDS } from "./connectivity/index.mjs";
+import { runConnectivityDoctor } from "./connectivity/doctor.mjs";
+import { LOCAL_PORT } from "./connectivity/shared.mjs";
+import { createSubprocessRunner } from "./connectivity/subprocess.mjs";
 import {
   mintCloudflareTurnIceServers,
   TurnError,
@@ -76,7 +79,7 @@ import {
   verifySignedHostGrantRevocation,
 } from "@janjacord/protocol";
 import * as mls from "@janjacord/crypto-core";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn as nodeSpawn, execFile as nodeExecFile } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -2721,6 +2724,28 @@ function registerIpc() {
       };
     } catch (error) {
       return { ok: false, error: { code: "unavailable", message: String(error?.message ?? error) } };
+    }
+  });
+  let doctorRunner = null;
+  ipcMain.handle("connectivity.doctor", async () => {
+    try {
+      const route = readConnectivityConfig().activeRoute ?? null;
+      const data = await runConnectivityDoctor({
+        activeRoute: route,
+        backendPort: LOCAL_PORT,
+        runAgentStatus: route?.provider === "zrok" ? async () => {
+          doctorRunner ??= createSubprocessRunner({ spawn: nodeSpawn, execFile: nodeExecFile });
+          try {
+            const result = await doctorRunner.run("zrok2", ["agent", "status"], { timeoutMs: 8_000 });
+            return `${result.stdout}\n${result.stderr}`;
+          } catch (error) {
+            throw new Error(`${error?.message ?? error} ${error?.stderr ?? ""}`.trim());
+          }
+        } : undefined,
+      });
+      return { ok: true, data };
+    } catch (error) {
+      return { ok: false, error: { code: error?.code ?? "unavailable", message: String(error?.message ?? error) } };
     }
   });
   ipcMain.handle("connectivity.ice-config", async () => {

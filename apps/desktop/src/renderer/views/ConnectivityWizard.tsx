@@ -64,6 +64,7 @@ const CONNECTIVITY_ERRORS: Record<string, string> = {
   zrok_env_not_enabled: "O ambiente Zrok não ficou habilitado após o enable. Confira o authtoken e tente novamente.",
   zrok_token_required: "Informe o authtoken da sua conta Zrok para o app habilitar o ambiente automaticamente.",
   zrok_name_conflict: "Não foi possível reservar o nome da rota Zrok. Use outro nome e tente novamente.",
+  zrok_route_name_busy: "Esse nome de rota está preso por uma share antiga na sua conta Zrok. Escolha outro nome — o endereço muda, mas continua estável.",
   invalid_name: "O nome da rota Zrok é inválido. Use minúsculas, números e hífens.",
   turn_auth_failed: "As credenciais do TURN da Cloudflare foram rejeitadas. Confira TURN Key ID e API token.",
   turn_unreachable: "Não foi possível falar com o TURN da Cloudflare. Verifique a rede e tente novamente.",
@@ -259,16 +260,31 @@ function ProgressRows({ phase }: { phase: WizardPhase }) {
   );
 }
 
+/** Nome de rota sugerido a partir do nome da comunidade: minúsculas, hífens, sem acento. */
+export function suggestRouteName(name: string): string {
+  return name
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-")
+    .slice(0, 63)
+    .replace(/^-+|-+$/g, "");
+}
+
 export function ConnectivityWizard({
   onClose,
   onChanged,
   onOpenAdvanced,
   onOpenTutorial,
+  suggestedRouteName,
 }: {
   onClose: () => void;
   onChanged?: () => void | Promise<void>;
   onOpenAdvanced: () => void;
   onOpenTutorial?: () => void;
+  suggestedRouteName?: string;
 }) {
   const [phase, setPhase] = useState<WizardPhase>("detecting");
   const [providers, setProviders] = useState<ConnectivityProvider[]>([]);
@@ -374,7 +390,12 @@ export function ConnectivityWizard({
 
   const choose = (provider: ConnectivityProviderId) => {
     setSelectedId(provider);
-    setForm(EMPTY_FORM);
+    // Rota Zrok já nasce com nome sugerido a partir da comunidade — o Owner não precisa
+    // inventar grafia (nomes divergentes criam reservas órfãs na conta do provedor).
+    const preset = provider === "zrok" && suggestedRouteName && suggestRouteName(suggestedRouteName)
+      ? { domain: suggestRouteName(suggestedRouteName) }
+      : null;
+    setForm(preset ? { ...EMPTY_FORM, ...preset } : EMPTY_FORM);
     setError(null);
     setPhase("configuring");
   };

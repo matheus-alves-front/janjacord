@@ -6,9 +6,19 @@ import {
   isValidHostname,
   providerBlockReason,
   sanitizeEndpoint,
+  suggestRouteName,
 } from "./ConnectivityWizard";
 
 const emptyForm = { token: "", domain: "", cloudflareMode: "quick" as const };
+
+describe("suggested route name", () => {
+  it("slugifies community names into valid zrok route labels", () => {
+    expect(suggestRouteName("Meu Servidor")).toBe("meu-servidor");
+    expect(suggestRouteName("  Comunidade da Vila!  ")).toBe("comunidade-da-vila");
+    expect(suggestRouteName("Açaí & Café")).toBe("acai-cafe");
+    expect(suggestRouteName("--##--")).toBe("");
+  });
+});
 
 describe("connectivity provider configuration", () => {
   it("builds only the configuration required by each provider", () => {

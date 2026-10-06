@@ -501,6 +501,25 @@ describe("zrok adapter", () => {
       .rejects.toMatchObject({ code: "zrok_token_required" });
   });
 
+  it("fails with zrok_route_name_busy when the reserved name is held by a zombie share", async () => {
+    const nameConflict = Object.assign(new Error("reserved"), {
+      code: 1,
+      stderr: '[ERROR]: unable to create name ([POST /share/name][409] createShareNameConflict "")',
+    });
+    const shareConflict = Object.assign(new Error("conflict"), {
+      code: 1,
+      stderr: '[ERROR]: error creating share (rpc error: code = Unknown desc = unable to start share: [POST /share][409] shareConflict "name \'felllassss\' in namespace \'public\' is already in use by another share")',
+    });
+    const execFile = fakeExecFile({
+      "zrok2 status": { stdout: STATUS_ENABLED },
+      "zrok2 create name -n public felllassss": nameConflict,
+      "zrok2 share public 127.0.0.1:8931 -n public:felllassss --open --headless": shareConflict,
+    });
+    const registry = createProviderRegistry({ spawn: fakeSpawn(), execFile });
+    await expect(registry.start(PROVIDER_IDS.ZROK, { name: "felllassss", startupTimeoutMs: 5_000 }))
+      .rejects.toMatchObject({ code: "zrok_route_name_busy" });
+  });
+
   it("rejects an invalid share name before running commands", async () => {
     const execFile = fakeExecFile();
     const registry = createProviderRegistry({ spawn: fakeSpawn(), execFile });

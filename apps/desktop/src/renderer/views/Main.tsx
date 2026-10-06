@@ -885,7 +885,7 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" aria-hidden />
               </span>
               <span className="min-w-0 flex-1 truncate text-[10px] font-medium text-emerald-200">
-                {activeRoute.provider === "tailscale" ? "Tailscale" : activeRoute.provider === "ngrok" ? "ngrok" : activeRoute.provider === "cloudflare" ? "Cloudflare" : "Nginx"} · rota ativa
+                {activeRoute.provider === "tailscale" ? "Tailscale" : activeRoute.provider === "ngrok" ? "ngrok" : activeRoute.provider === "cloudflare" ? "Cloudflare" : activeRoute.provider === "zrok" ? "Zrok" : "Nginx"} · rota ativa
               </span>
               <span className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-medium uppercase tracking-wide ${activeRoute.media === "turn" ? "bg-emerald-900/60 text-emerald-200" : "bg-amber-900/50 text-amber-200"}`}>
                 {activeRoute.media === "turn" ? "TURN" : "direta"}
@@ -955,6 +955,7 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
         <ServerSettings
           server={server}
           canConfigureConnectivity={communities.find((community) => community.serverId === server.serverId)?.connectionKind !== "remote"}
+          communityName={communities.find((community) => community.serverId === server.serverId)?.serverName}
           initialTab={settingsInitialTab}
           onClose={() => {
             setShowSettings(false);
