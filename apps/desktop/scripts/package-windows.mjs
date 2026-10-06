@@ -29,8 +29,16 @@ function fail(message) {
   throw new Error(message);
 }
 
+// spawnSync sem shell não executa shims .cmd no Windows (somente .exe é resolvido pelo
+// CreateProcess); o pnpm instalado no runner expõe apenas o shim pnpm.cmd. Comandos que já são
+// caminhos (ex.: process.execPath) passam sem alteração.
+function resolveWindowsCommand(command) {
+  if (process.platform !== "win32" || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(command)) return command;
+  return `${command}.cmd`;
+}
+
 function run(command, commandArgs, options = {}) {
-  const result = spawnSync(command, commandArgs, {
+  const result = spawnSync(resolveWindowsCommand(command), commandArgs, {
     cwd: options.cwd ?? workspaceRoot,
     stdio: "inherit",
     env: options.env ?? process.env,
