@@ -175,6 +175,7 @@ export async function runConnectivityDoctor({
   if (!route?.endpoint) hints.push(HINTS.route_missing);
 
   let agentShare = null;
+  let zombies = [];
   if (route?.provider === "zrok" && typeof runAgentStatus === "function") {
     let shares = [];
     let agentError = null;
@@ -200,6 +201,12 @@ export async function runConnectivityDoctor({
             : "agente sem nenhuma share",
     });
     if (state === "missing") hints.push(retrying > 0 ? HINTS.agent_share_retrying : HINTS.agent_share_missing);
+    zombies = shares
+      .filter((share) => share.status === "retrying" && !share.endpoint)
+      .map((share) => share.token);
+    if (zombies.length > 0) {
+      hints.push(`${zombies.length} share(s) órfã(s) de tentativas antigas podem ser limpas.`);
+    }
   }
 
   let edge = null;
@@ -219,5 +226,6 @@ export async function runConnectivityDoctor({
     overall: failed.length === 0 ? "ok" : checks.some((check) => check.ok) ? "degraded" : "down",
     checks,
     hints,
+    zombies,
   };
 }

@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld("janjacord", {
   connectivityProviderStart: (provider, config) => ipcRenderer.invoke("connectivity.provider.start", { provider, config }),
   connectivityProviderStop: () => ipcRenderer.invoke("connectivity.provider.stop"),
   connectivityDoctor: () => ipcRenderer.invoke("connectivity.doctor"),
+  connectivityDoctorCleanup: () => ipcRenderer.invoke("connectivity.doctor.cleanup"),
   iceConfiguration: () => ipcRenderer.invoke("connectivity.ice-config"),
   bridgeAdd: (pairingCode) => ipcRenderer.invoke("connectivity.bridge.add", { pairingCode }),
   bridgeRemove: (bridgeId) => ipcRenderer.invoke("connectivity.bridge.remove", { bridgeId }),

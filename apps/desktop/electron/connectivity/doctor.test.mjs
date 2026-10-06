@@ -41,7 +41,9 @@ describe("connectivity doctor", () => {
       });
       expect(report.overall).toBe("ok");
       expect(report.checks.map((check) => check.ok)).toEqual([true, true, true, true]);
-      expect(report.hints).toEqual([]);
+      // share órfã não derruba o overall, mas é reportada para limpeza opcional
+      expect(report.zombies).toEqual(["err_p9MT1wSb"]);
+      expect(report.hints).toEqual(["1 share(s) órfã(s) de tentativas antigas podem ser limpas."]);
     } finally {
       server.close();
     }
@@ -60,6 +62,7 @@ describe("connectivity doctor", () => {
     expect(ids).toContain("agent");
     expect(ids).toContain("edge");
     expect(report.hints.join("\n")).toMatch(/órfã/i);
+    expect(report.zombies).toEqual(["err_p9MT1wSb"]);
   });
 
   it("reports route missing when nothing is active", async () => {

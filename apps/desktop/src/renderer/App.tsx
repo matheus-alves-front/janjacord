@@ -23,6 +23,7 @@ interface WindowApi {
   connectivityProviderStart: (provider: ConnectivityProviderId, config: Record<string, string | boolean>) => Promise<{ ok: boolean; data?: ConnectivityRoute; error?: IpcError }>;
   connectivityProviderStop: () => Promise<{ ok: boolean; data?: { stopped: boolean }; error?: IpcError }>;
   connectivityDoctor: () => Promise<{ ok: boolean; data?: ConnectivityDoctorReport; error?: IpcError }>;
+  connectivityDoctorCleanup: () => Promise<{ ok: boolean; data?: { deleted: string[] }; error?: IpcError }>;
   iceConfiguration: () => Promise<{ ok: boolean; data?: { iceServers: RTCIceServer[]; iceTransportPolicy: "all" | "relay"; expiresAt?: number }; error?: IpcError }>;
   bridgeAdd: (pairingCode: string) => Promise<{ ok: boolean; data?: { bridgeId: string; endpoint: string; expiresAt: number; warning?: string }; error?: IpcError }>;
   bridgeRemove: (bridgeId: string) => Promise<{ ok: boolean; error?: { message: string } }>;
@@ -86,6 +87,7 @@ export interface ConnectivityDoctorReport {
   overall: "ok" | "degraded" | "down";
   checks: ConnectivityDoctorCheck[];
   hints: string[];
+  zombies?: string[];
 }
 
 export interface CommunitySummary {

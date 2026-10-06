@@ -35,7 +35,7 @@ import {
 import { createCipheriv, createDecipheriv, createHash, createHmac, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { durableAtomicWrite, ensureEncryptedDatabaseKey } from "./primary-host-profile.mjs";
 import { createProviderRegistry, PROVIDER_IDS } from "./connectivity/index.mjs";
-import { runConnectivityDoctor } from "./connectivity/doctor.mjs";
+import { runConnectivityDoctor, parseAgentShares } from "./connectivity/doctor.mjs";
 import { LOCAL_PORT } from "./connectivity/shared.mjs";
 import { createSubprocessRunner } from "./connectivity/subprocess.mjs";
 import {
@@ -80,6 +80,7 @@ import {
 } from "@janjacord/protocol";
 import * as mls from "@janjacord/crypto-core";
 import { execFileSync, spawn as nodeSpawn, execFile as nodeExecFile } from "node:child_process";
+import net from "node:net";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -1260,6 +1261,77 @@ function stopReplicaHost() {
   replicaProcess = null;
 }
 
+// ---------------------------------------------------------------- Watchdog do host
+// Um event loop wedged no JanjaNode deixa a comunidade muda sem processo morto (handshake
+// lento até em loopback). Sonda o upgrade local com orçamento curto e reinicia o host
+// automaticamente quando ele para de responder dentro do esperado.
+
+const HOST_WATCHDOG_INTERVAL_MS = 30_000;
+const HOST_WATCHDOG_BUDGET_MS = 5_000;
+const HOST_WATCHDOG_FAILURES_TO_RESTART = 2;
+let hostWatchdogTimer = null;
+let hostWatchdogFailures = 0;
+let hostWatchdogRestarting = false;
+
+function hostRespondsInTime(budgetMs) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const socket = net.connect({ host: "127.0.0.1", port: LOCAL_PORT });
+    let settled = false;
+    const finish = (connected, responded) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { socket.destroy(); } catch { /* already closed */ }
+      resolve(connected && responded && (Date.now() - started) <= budgetMs);
+    };
+    const timer = setTimeout(() => finish(true, false), budgetMs);
+    socket.once("connect", () => {
+      socket.write(`GET /signal HTTP/1.1\r\nHost: 127.0.0.1:${LOCAL_PORT}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${randomBytes(16).toString("base64")}\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+      let buffer = "";
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("latin1");
+        if (buffer.includes("\r\n")) finish(true, true);
+      });
+    });
+    socket.once("error", () => finish(false, false));
+  });
+}
+
+async function checkHostResponsiveness() {
+  if (hostWatchdogRestarting) return;
+  if (!hostProcess) {
+    hostWatchdogFailures = 0;
+    return;
+  }
+  const responsive = await hostRespondsInTime(HOST_WATCHDOG_BUDGET_MS);
+  if (responsive) {
+    hostWatchdogFailures = 0;
+    return;
+  }
+  hostWatchdogFailures++;
+  console.warn(`[desktop] watchdog do host: sem resposta no orçamento de ${HOST_WATCHDOG_BUDGET_MS}ms (${hostWatchdogFailures}/${HOST_WATCHDOG_FAILURES_TO_RESTART})`);
+  if (hostWatchdogFailures < HOST_WATCHDOG_FAILURES_TO_RESTART) return;
+  hostWatchdogRestarting = true;
+  hostWatchdogFailures = 0;
+  try {
+    console.warn("[desktop] watchdog do host: reiniciando servidor da comunidade");
+    notifyRenderer("host.watchdog", { action: "restart" });
+    await restartHostedServer();
+    notifyRenderer("host.watchdog", { action: "recovered" });
+  } catch (error) {
+    console.error(`[desktop] watchdog do host: reinício falhou: ${error?.message ?? error}`);
+  } finally {
+    hostWatchdogRestarting = false;
+  }
+}
+
+function startHostWatchdog() {
+  if (hostWatchdogTimer) return;
+  hostWatchdogTimer = setInterval(() => { void checkHostResponsiveness(); }, HOST_WATCHDOG_INTERVAL_MS);
+  hostWatchdogTimer.unref?.();
+}
+
 async function restartHostedServer() {
   if (!identity || !hostProcess) return;
   try { client?.close(); } catch { /* already closed */ }
@@ -1938,6 +2010,7 @@ async function handleDelivered(env, boundClient = client) {
 
 // ---------------------------------------------------------------- IPC
 function registerIpc() {
+  startHostWatchdog();
   installIpcTrustBoundary();
   ipcMain.handle("identity.status", async () => {
     const { existsSync } = await import("node:fs");
@@ -2744,6 +2817,25 @@ function registerIpc() {
         } : undefined,
       });
       return { ok: true, data };
+    } catch (error) {
+      return { ok: false, error: { code: error?.code ?? "unavailable", message: String(error?.message ?? error) } };
+    }
+  });
+  ipcMain.handle("connectivity.doctor.cleanup", async () => {
+    try {
+      doctorRunner ??= createSubprocessRunner({ spawn: nodeSpawn, execFile: nodeExecFile });
+      const status = await doctorRunner.run("zrok2", ["agent", "status"], { timeoutMs: 8_000 });
+      const shares = parseAgentShares(`${status.stdout}\n${status.stderr}`);
+      // Share em retry sem endpoint jamais foi publicada: deletar não afeta rota em uso.
+      const zombies = shares.filter((share) => share.status === "retrying" && !share.endpoint);
+      const deleted = [];
+      for (const zombie of zombies) {
+        try {
+          await doctorRunner.run("zrok2", ["delete", "share", zombie.token], { timeoutMs: 10_000 });
+          deleted.push(zombie.token);
+        } catch { /* best-effort: token pode ter expirado no provedor */ }
+      }
+      return { ok: true, data: { deleted } };
     } catch (error) {
       return { ok: false, error: { code: error?.code ?? "unavailable", message: String(error?.message ?? error) } };
     }

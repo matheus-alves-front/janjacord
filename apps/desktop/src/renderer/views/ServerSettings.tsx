@@ -136,6 +136,16 @@ export function ServerSettings({ server, onClose, initialTab = "members", canCon
   const [doctorState, setDoctorState] = useState<"idle" | "running" | "done" | "error">("idle");
   const [doctorReport, setDoctorReport] = useState<ConnectivityDoctorReport | null>(null);
   const [doctorError, setDoctorError] = useState<string | null>(null);
+  const [cleaningZombies, setCleaningZombies] = useState(false);
+
+  const cleanupZombieShares = async () => {
+    setCleaningZombies(true);
+    try {
+      await window.janjacord.connectivityDoctorCleanup();
+    } catch { /* melhor esforço; o próximo diagnóstico reavalia */ }
+    setCleaningZombies(false);
+    await runConnectivityDoctor();
+  };
   const [hostsError, setHostsError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   const [confirmGrant, setConfirmGrant] = useState<HostGrant | null>(null);
@@ -848,6 +858,15 @@ export function ServerSettings({ server, onClose, initialTab = "members", canCon
                         {doctorReport.hints.map((hint) => (
                           <p key={hint} className="flex items-start gap-2 text-xs leading-5 text-amber-200"><TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />{hint}</p>
                         ))}
+                        {(doctorReport.zombies?.length ?? 0) > 0 && (
+                          <button
+                            className="mt-2 rounded border border-amber-700 px-2 py-1 text-[11px] font-medium text-amber-100 hover:bg-amber-950/60 disabled:opacity-50"
+                            disabled={cleaningZombies}
+                            onClick={() => void cleanupZombieShares()}
+                          >
+                            {cleaningZombies ? "Limpando..." : `Limpar ${doctorReport.zombies!.length} share(s) órfã(s)`}
+                          </button>
+                        )}
                       </div>
                     )}
                     {doctorReport.overall === "ok" && <p className="text-xs leading-5 text-emerald-300">Tudo certo por aqui — o problema, se houver, está na rede ou no dispositivo de quem entra.</p>}
