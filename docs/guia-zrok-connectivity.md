@@ -14,7 +14,7 @@ de ponta a ponta; o serviço Zrok pode observar apenas metadados de transporte e
 - o comando `zrok2` instalado (veja abaixo);
 - uma conta Zrok **hosted** (https://zrok.io ou o console da NetFoundry) ou uma instância
   **self-hosted** (avançado, seção 5);
-- o ambiente Zrok habilitado uma única vez no seu terminal.
+- o authtoken da sua conta Zrok (o app habilita o ambiente pra você, sem terminal).
 
 ### Instalar o `zrok2` (versão 2)
 
@@ -36,17 +36,21 @@ Confira com `zrok2 version`. O comando legado `zrok` (v1) **não** é usado por 
 ## 2. Criar a conta e habilitar o ambiente
 
 1. Crie sua conta em https://zrok.io (o token de conta fica no painel).
-2. No terminal, habilite o ambiente uma única vez:
+2. No JanjaCord (**Configurações → Conectividade → Zrok**), informe o nome da rota e cole o
+   authtoken quando o wizard pedir. O app habilita o ambiente `~/.zrok2` uma única vez e ativa a
+   rota — sem terminal.
+3. Se preferir conferir depois: `zrok2 status` mostra `Account Token <<SET>>` na seção
+   Environment.
+
+Habilitar manualmente também funciona, se você já tiver o hábito:
 
 ```bash
 zrok2 enable <seu_token_de_conta> --headless
 ```
 
-3. Confira: `zrok2 status` deve mostrar `Account Token <<SET>>` na seção Environment.
-
-O token de conta é segredo do ambiente Zrok. O JanjaCord **nunca** pede nem armazena esse token:
-ele reutiliza o ambiente `~/.zrok2` que você habilitou. Se o app detectar que o ambiente ainda
-não foi habilitado, ele mostra este comando para você rodar no terminal.
+O token de conta é segredo. Quando você cola no wizard, o JanjaCord guarda no cofre seguro do
+sistema operacional (`safeStorage`) e não o exibe de novo; ele só é usado para habilitar o
+ambiente. Se o ambiente já estiver habilitado, o wizard nem pede o token.
 
 ## 3. Publicar a comunidade pelo app
 
@@ -81,7 +85,9 @@ zrok2 config set apiEndpoint https://sua-instancia.example.com
 zrok2 enable <token_da_instancia> --headless
 ```
 
-2. Use o app normalmente — o fluxo é o mesmo.
+2. Depois habilite o ambiente no terminal apontando para a sua instância — o enable pelo wizard
+   assume o endpoint hosted, então na self-hosted este passo continua manual. Em seguida use o
+   app normalmente: com o ambiente já habilitado, o wizard nem pede token.
 
 O JanjaCord não provisiona a instância: subir, manter e garantir disponibilidade do servidor é
 responsabilidade do operador.

@@ -20,31 +20,34 @@ criada localmente, o conteúdo é criptografado de ponta a ponta e cada comunida
 pelos computadores dos próprios membros.
 
 O desktop é a superfície principal atual. Ele inicia o host da comunidade e oferece um assistente
-para publicar o JanjaNode sem VPS por Tailscale Funnel, ngrok ou Cloudflare Tunnel. Também aceita
-domínio próprio com Nginx. O convite `JC4` leva rotas WSS assinadas e vinculadas à chave do host;
+para publicar o JanjaNode sem VPS por Tailscale Funnel, ngrok, Cloudflare Tunnel ou Zrok. Também
+aceita domínio próprio com Nginx. O convite `JC4` leva rotas WSS assinadas e vinculadas à chave do host;
 JanjaBridges comunitários continuam disponíveis como infraestrutura avançada e redundante.
 
 > **Estado do projeto:** candidato desktop validado localmente no Linux, com os gates de código,
-> segurança, QA/release e UI/UX verdes para o fluxo zero-VPS. Ainda não é uma release pública
-> final: o dono precisa testar duas rotas plug-and-play, e instalação/assinatura em Windows real,
-> login/reboot e o aceite WAN entre duas redes físicas continuam pendentes. Mobile está em uma
-> fase posterior.
+> segurança, QA/release e UI/UX verdes para o fluxo zero-VPS. Instaladores Linux (AppImage/DEB) e
+> um instalador Windows de teste (NSIS sem assinatura) são gerados por CI a cada push. Ainda não
+> é uma release pública final: falta o aceite WAN do dono em duas redes físicas, assinatura de
+> código em Windows real e validação de login/reboot. Mobile está em uma fase posterior.
 
 ## O que funciona hoje
 
 - identidade pseudônima local com nickname, senha, vault cifrado e recovery key;
 - criação de comunidade com JanjaNode embutido no desktop do Owner;
 - entrada por um único convite `JC4`, com rotas WSS assinadas e host key pinada;
-- publicação sem VPS pelo app com Tailscale Funnel, ngrok ou Cloudflare Tunnel;
+- publicação sem VPS pelo app com Tailscale Funnel, ngrok, Cloudflare Tunnel ou Zrok (endereço
+  estável, habilitação da conta direto no assistente, sem terminal);
 - opção avançada de domínio próprio/Nginx e JanjaBridges comunitários;
 - mensagens de grupo E2EE com MLS, audience snapshot e purge por consumo ou retenção;
 - anexos cifrados, com o host armazenando apenas bytes cifrados e temporários;
 - canais, presença, roles, permissões, overrides, invites, kick e ban;
-- voz e vídeo em WebRTC mesh P2P, com modos direct-first e relay-only;
+- voz e vídeo em WebRTC mesh P2P, com microfone, câmera, deafen e saída controlados pela
+  interface, e modos direct-first e relay-only;
 - TURN da Cloudflare configurável no app, com credenciais efêmeras de curta duração;
 - Community Hosts autorizados para replicação, revogação e failover;
 - múltiplos JanjaBridges por comunidade, sem bridge global obrigatório da JanjaCord;
-- AppImage e DEB com fluxo de empacotamento e validação reproduzível;
+- AppImage e DEB Linux e instalador NSIS de teste para Windows, com empacotamento e validação
+  reproduzíveis e regeneração automática por CI a cada push;
 - zero SDK de analytics e zero telemetria comportamental.
 
 ## Como funciona
@@ -53,7 +56,7 @@ JanjaBridges comunitários continuam disponíveis como infraestrutura avançada 
                          Internet
                             |
               rota WSS publicada pelo desktop
-       Tailscale / ngrok / Cloudflare / domínio próprio
+   Tailscale / ngrok / Cloudflare / Zrok / domínio próprio
                             |
         +-------------------+-------------------+
         |                                       |
@@ -130,7 +133,7 @@ TURN; o app solicita credenciais ICE curtas e não grava essas credenciais no co
 | `apps/janjanode` | Membership, spool cifrado, signaling, grants, snapshots, réplica e failover |
 | `apps/rendezvous` | Control plane efêmero do JanjaBridge, records assinados e credenciais TURN |
 | `apps/push` | Base de push genérico; provider real FCM/APNs ainda não faz parte do desktop atual |
-| `apps/mobile` | Cliente React Native/Expo em fase posterior; não faz parte da validação desktop R9 |
+| `apps/mobile` | Cliente React Native/Expo em fase posterior; não faz parte da validação desktop atual |
 | `packages/crypto-core` | MLS com `mls-rs` compilado para WASM |
 | `packages/crypto` | KDF, AEAD, assinatura e boundaries criptográficos compartilhados |
 | `packages/identity` | Identidade local, vault e recovery |
@@ -206,7 +209,7 @@ pnpm --filter @janjacord/desktop run validate:release-config
 Os smokes cobrem conexão direta, TURN, relay-only, failover de bridge, grants, snapshot,
 replicação, promoção, self-fencing e os IPCs usados pelo fluxo operador.
 
-O baseline R9 passou localmente:
+O baseline atual passou localmente:
 
 - 178 testes;
 - typecheck e build de todo o workspace;
@@ -217,8 +220,10 @@ O baseline R9 passou localmente:
 
 Esses resultados não substituem o aceite físico ainda pendente em Windows e WAN.
 
-Na entrega zero-VPS mais recente, os testes de protocolo passaram 15/15 e os testes do desktop,
-incluindo JC4, lifecycle dos providers e Cloudflare TURN, passaram 57/57 com typecheck do pacote.
+Na entrega mais recente (outubro de 2026), os testes do desktop passaram 70/70 (incluindo
+JC4, lifecycle dos providers, Cloudflare TURN, controles de call e habilitação Zrok pela UI),
+os testes de protocolo 16/16, e typecheck e testes de todo o workspace estão verdes no CI,
+junto com o empacotamento Linux e Windows.
 
 ## Empacotamento desktop
 
@@ -246,6 +251,12 @@ pnpm --filter @janjacord/desktop run dist:win:release
 O segundo comando exige configuração real de assinatura. Não publique o artefato unsigned como
 release. Política de proveniência, autostart, firewall, assinatura e validação completa:
 [docs/DESKTOP-RELEASE.md](docs/DESKTOP-RELEASE.md).
+
+Instaladores de teste são publicados automaticamente como artefatos das runs de
+[GitHub Actions](https://github.com/matheus-alves-front/janjacord/actions) (retenção de 7 dias).
+O instalador Windows de teste é **sem assinatura**: o SmartScreen mostra um aviso na primeira
+execução ("Mais informações" → "Executar assim mesmo"). Artefatos de teste não devem ser
+tratados como release pública.
 
 ## Hospedar um JanjaBridge
 
@@ -308,7 +319,6 @@ operar a rede.
 
 ## Licença
 
-Ainda não há um arquivo `LICENSE` neste repositório. O objetivo do projeto é ser open source, mas
-os termos de uso, cópia, modificação e redistribuição precisam ser definidos antes de uma release
-pública. Até isso acontecer, a disponibilidade do código não deve ser interpretada como concessão
-automática de uma licença open source.
+O JanjaCord é open source sob a licença [MIT](LICENSE). Você pode usar, copiar, modificar e
+redistribuir o código, inclusive em projetos comerciais, mantendo o aviso de copyright. Sem
+garantia: o software é fornecido "no estado em que se encontra".
