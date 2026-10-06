@@ -64,6 +64,10 @@ jobs:
         shell: pwsh
         run: pnpm install --frozen-lockfile
 
+      - name: Build workspace packages
+        shell: pwsh
+        run: pnpm build
+
       - name: Typecheck desktop
         shell: pwsh
         run: pnpm --filter @janjacord/desktop typecheck
