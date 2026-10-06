@@ -414,12 +414,19 @@ function windowsSignatureStatus(file) {
   if (process.platform !== "win32") fail("Windows artifact signature validation must run on Windows");
   const escaped = file.replace(/'/g, "''");
   const command = `(Get-AuthenticodeSignature -LiteralPath '${escaped}').Status.ToString()`;
-  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
-    cwd: workspaceRoot,
-    encoding: "utf8",
-  });
-  if (result.error || result.status !== 0) fail(`Authenticode inspection failed: ${(result.stderr || result.error?.message || "").trim()}`);
-  return result.stdout.trim();
+  const args = ["-NoProfile", "-NonInteractive", "-Command", command];
+  // Imagens recentes de runners Windows quebram o autoload de módulos do Windows PowerShell 5.1;
+  // pwsh (PowerShell 7) traz módulo Security próprio. Em host sem pwsh, cai para o 5.1.
+  let lastFailure = "";
+  for (const shell of ["pwsh.exe", "powershell.exe"]) {
+    const result = spawnSync(shell, args, {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+    });
+    if (!result.error && result.status === 0) return result.stdout.trim();
+    lastFailure = (result.stderr || result.error?.message || "").trim();
+  }
+  fail(`Authenticode inspection failed: ${lastFailure}`);
 }
 
 function validateWindowsArtifacts(releaseDir, expectedSignature) {
