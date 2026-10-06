@@ -29,19 +29,21 @@ function fail(message) {
   throw new Error(message);
 }
 
-// spawnSync sem shell não executa shims .cmd no Windows (somente .exe é resolvido pelo
-// CreateProcess); o pnpm instalado no runner expõe apenas o shim pnpm.cmd. Comandos que já são
-// caminhos (ex.: process.execPath) passam sem alteração.
-function resolveWindowsCommand(command) {
-  if (process.platform !== "win32" || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(command)) return command;
-  return `${command}.cmd`;
-}
-
+// spawnSync sem shell não executa shims .cmd no Windows: sem shell o CreateProcess só resolve
+// .exe, e com o endurecimento pós-CVE-2024-27980 o Node devolve EINVAL para .cmd. Comandos
+// bare (pnpm) no Windows passam a usar shell; como o shell não faz quoting de argumentos,
+// argumentos com espaço/metacaractere são rejeitados explicitamente em vez de quebrarem de
+// forma silenciosa. Caminhos absolutos (ex.: process.execPath) e POSIX seguem diretos.
 function run(command, commandArgs, options = {}) {
-  const result = spawnSync(resolveWindowsCommand(command), commandArgs, {
+  const windowsShellCommand = process.platform === "win32" && /^[A-Za-z][A-Za-z0-9_-]*$/.test(command);
+  if (windowsShellCommand && commandArgs.some((arg) => /[\s"&|<>^]/.test(arg))) {
+    fail(`refusing to run '${command}' through the Windows shell: argument contains spaces or shell metacharacters`);
+  }
+  const result = spawnSync(windowsShellCommand ? `${command}.cmd` : command, commandArgs, {
     cwd: options.cwd ?? workspaceRoot,
     stdio: "inherit",
     env: options.env ?? process.env,
+    ...(windowsShellCommand ? { shell: true } : {}),
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
