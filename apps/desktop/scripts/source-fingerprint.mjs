@@ -28,6 +28,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
 
+// Imagens recentes de runners Windows expõem TEMP em caminho curto 8.3 (ex.: RUNNER~1); o
+// realpath padrão não expande esses componentes enquanto o git devolve o caminho longo, o que
+// quebra comparações de raiz. realpathSync.native resolve pelo caminho real longo; no POSIX o
+// comportamento atual é preservado.
+const realpath = process.platform === "win32" ? realpathSync.native : realpathSync;
+
 export const SOURCE_MANIFEST_FILENAME = "janjacord-source-manifest.json";
 export const SOURCE_MANIFEST_KIND = "janjacord-source-provenance";
 export const SOURCE_MANIFEST_SCHEMA_VERSION = 3;
@@ -240,7 +246,7 @@ export function validatePrivilegedPayloadAttestation(payloads, label = "privileg
 }
 
 export function computePrivilegedPayloadAttestation(repoRoot) {
-  const root = realpathSync(repoRoot);
+  const root = realpath(repoRoot);
   const payloads = PRIVILEGED_PAYLOAD_SPECS.map(({ sourcePath, asarPath }) => {
     const absolute = path.resolve(root, ...sourcePath.split("/"));
     if (!absolute.startsWith(`${root}${path.sep}`)) fail(`privileged payload escapes the repository: ${sourcePath}`);
@@ -326,7 +332,7 @@ function workspaceRuntimeDependencies(workspacePackage, packagesByName) {
 }
 
 export function discoverRuntimeWorkspacePlan(workspaceRoot) {
-  const root = realpathSync(workspaceRoot);
+  const root = realpath(workspaceRoot);
   const packagesByName = loadWorkspacePackages(root);
   if (!packagesByName.has(RUNTIME_BUILD_ROOT_WORKSPACE)) fail(`runtime root workspace ${RUNTIME_BUILD_ROOT_WORKSPACE} was not found`);
 
@@ -354,7 +360,7 @@ export function discoverRuntimeWorkspacePlan(workspaceRoot) {
 }
 
 export function cleanGeneratedRuntimeOutputs(workspaceRoot, plan) {
-  const root = realpathSync(workspaceRoot);
+  const root = realpath(workspaceRoot);
   for (const workspace of plan) {
     for (const outputRoot of workspace.outputRoots) {
       if (!safeRuntimeOutputRoots.has(outputRoot)) fail(`refusing to clean unsupported runtime output root: ${outputRoot}`);
@@ -394,7 +400,7 @@ function listRuntimePayloadFiles(root, relativeDirectory) {
 }
 
 export function computeRuntimeBuildAttestation(workspaceRoot, plan = discoverRuntimeWorkspacePlan(workspaceRoot)) {
-  const root = realpathSync(workspaceRoot);
+  const root = realpath(workspaceRoot);
   const payloads = [];
   for (const workspace of plan) {
     for (const outputRoot of workspace.outputRoots) {
@@ -540,8 +546,8 @@ function fingerprintRecords(records) {
 }
 
 export function computeSourceSnapshot(repoRoot) {
-  const root = realpathSync(repoRoot);
-  const discoveredRoot = realpathSync(runGit(root, ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).stdout.trim());
+  const root = realpath(repoRoot);
+  const discoveredRoot = realpath(runGit(root, ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).stdout.trim());
   if (root !== discoveredRoot) fail(`source root must be the Git toplevel: expected ${discoveredRoot}, got ${root}`);
 
   const headBeforeResult = runGit(root, ["rev-parse", "--verify", "HEAD"], { encoding: "utf8", allowFailure: true });
@@ -746,7 +752,7 @@ export function validateSourceSnapshotDescriptor(descriptor, label = "source sna
 }
 
 export function createSourceSnapshotArtifact(repoRoot, snapshot, outputDirectory) {
-  const root = realpathSync(repoRoot);
+  const root = realpath(repoRoot);
   if (!snapshot?.dirty) fail("recoverable source snapshots are required only for dirty reviewed source");
   const entries = validateSourceEntries(snapshot.entries);
   if (entries.length !== snapshot.entryCount || fingerprintRecords(entries) !== snapshot.fingerprint) {
