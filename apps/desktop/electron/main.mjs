@@ -6,6 +6,12 @@
  */
 import { app, BrowserWindow, clipboard, ipcMain, safeStorage, session, utilityProcess } from "electron";
 
+// Suites de segurança (Avast/AVG/Norton etc.) inspecionam HTTPS com certificado próprio,
+// instalado no cofre do Windows mas ausente do trust store embutido do Node/Electron — o
+// renderer conversa, mas conexões TLS do main process falham em silêncio e o join estoura
+// timeout. Confiar no cofre do sistema alinha o app ao comportamento do navegador.
+app.commandLine.appendSwitch("use-system-ca");
+
 // userData custom: permite rodar 2+ instâncias no mesmo PC (teste de 2 contas)
 if (process.env.JC_USERDATA_DIR) {
   app.setPath("userData", process.env.JC_USERDATA_DIR);
