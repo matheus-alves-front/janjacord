@@ -31,6 +31,13 @@ const FRIENDLY_MESSAGES: Record<string, string> = {
   version_mismatch: "Este convite requer uma versão diferente do JanjaCord. Atualize o app e tente novamente.",
   unsupported_version: "Este convite requer uma versão diferente do JanjaCord. Atualize o app e tente novamente.",
   timeout: "A conexão demorou além do esperado. Verifique a rede e tente novamente.",
+  route_tls_blocked: "O certificado da rota foi recusado nesta máquina. Antivírus ou proxy que inspeciona HTTPS é a causa mais comum — veja o detalhe abaixo.",
+  route_dns: "Esta máquina não conseguiu resolver o endereço da comunidade (DNS). Teste outro DNS ou outra rede.",
+  route_refused: "A rota da comunidade recusou a conexão desta máquina (porta bloqueada ou túnel fora do ar).",
+  route_unreachable: "Esta máquina não conseguiu alcançar a rota da comunidade (rede, firewall ou antivírus bloqueando o app).",
+  route_missing: "A rota publicada no convite não existe mais no provedor — peça um convite novo.",
+  route_backend_down: "A rota existe, mas o host atrás dela não está respondendo. Confirme se o app do host está aberto.",
+  route_failed: "Não foi possível abrir a rota da comunidade. Veja o detalhe técnico abaixo.",
   rate_limited: "Foram feitas muitas tentativas. Aguarde um momento e tente novamente.",
   legacy_confirmation_required: "Confira a fingerprint do host antes de continuar.",
 };
@@ -53,6 +60,17 @@ export function rejectedIpcError(error: unknown, fallback: string): string {
     return friendlyIpcError(error as IpcError, fallback);
   }
   return fallback;
+}
+
+/**
+ * Detalhe técnico que o main anexa às falhas de rota (fases medidas + erro real do socket). Não
+ * passa pelo mapa de mensagens amigáveis porque é exatamente o que o usuário copia para o suporte.
+ */
+export function technicalDiagnostic(error: IpcError | undefined): string | null {
+  const data = error?.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const diagnostic = (data as Record<string, unknown>).diagnostic;
+  return typeof diagnostic === "string" && diagnostic.trim().length > 0 ? diagnostic.trim() : null;
 }
 
 /** Supports the transitional IPC shapes used while the JC2 challenge contract is rolled out. */

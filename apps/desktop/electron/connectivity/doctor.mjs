@@ -152,9 +152,24 @@ export async function runConnectivityDoctor({
   runAgentStatus,
   probe = probeEdgeDetailed,
   hostLabel = "JanjaNode",
+  trustStore = null,
 } = {}) {
   const checks = [];
   const hints = [];
+
+  if (trustStore) {
+    checks.push({
+      id: "trust",
+      label: "Cofre de certificados desta máquina",
+      ok: trustStore.active === true,
+      detail: trustStore.active
+        ? `cofre do sistema em uso · ${trustStore.system} âncoras do sistema + ${trustStore.bundled} embutidas`
+        : `indisponível (${trustStore.error ?? "motivo desconhecido"}) · apenas as ${trustStore.bundled} raízes embutidas`,
+    });
+    if (trustStore.active !== true) {
+      hints.push("Sem o cofre do sistema, antivírus/proxy que inspeciona HTTPS derruba o join nesta máquina.");
+    }
+  }
 
   const backend = await tcpProbe("127.0.0.1", backendPort, 3_000);
   checks.push({

@@ -26,9 +26,9 @@ import { BridgePairingDialog } from "./BridgePairingDialog";
 import { JanjaBridgeTutorial } from "./JanjaBridgeTutorial";
 import { ServerSettings } from "./ServerSettings";
 import { SetupProgress, type SetupStepId, type SetupStepState, type SetupStepStatus } from "./SetupProgress";
-import type { CommunitySummary, ConnectivityRoute } from "../App";
+import type { CommunitySummary, ConnectivityRoute, RouteProbeResult } from "../App";
 import type { CallSignal } from "../webrtc";
-import { friendlyIpcError, legacyFingerprint, rejectedIpcError, type IpcError } from "../ipcErrors";
+import { friendlyIpcError, legacyFingerprint, rejectedIpcError, technicalDiagnostic, type IpcError } from "../ipcErrors";
 import { attachmentSizeIsAllowed, encodeAttachmentBytes } from "../attachmentEncoding";
 
 type ActiveAction = "create" | "join" | "invite" | null;
@@ -88,6 +88,10 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
   const [communityName, setCommunityName] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);
+  const [joinDiagnostic, setJoinDiagnostic] = useState<string | null>(null);
+  const [routeProbe, setRouteProbe] = useState<{ reachable: boolean; results: RouteProbeResult[] } | null>(null);
+  const [routeProbeState, setRouteProbeState] = useState<"idle" | "running">("idle");
+  const [routeProbeError, setRouteProbeError] = useState<string | null>(null);
   const [activeAction, setActiveAction] = useState<ActiveAction>(null);
   const [bootState, setBootState] = useState<LoadState>("loading");
   const [bootError, setBootError] = useState<string | null>(null);
@@ -508,6 +512,7 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
     const invite = joinKey.trim();
     setActiveAction("join");
     setJoinError(null);
+    setJoinDiagnostic(null);
     try {
       const result = await window.janjacord.serverJoin(hostUrl.trim(), invite, confirmLegacy);
       if (result.ok && result.data) {
@@ -528,12 +533,31 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
         return;
       }
       setLegacyChallenge(null);
+      setJoinDiagnostic(technicalDiagnostic(result.error));
       setJoinError(friendlyIpcError(result.error, "Não foi possível entrar nesta comunidade."));
     } catch (error) {
       setLegacyChallenge(null);
+      setJoinDiagnostic(technicalDiagnostic(error as IpcError));
       setJoinError(rejectedIpcError(error, "Não foi possível entrar nesta comunidade."));
     } finally {
       setActiveAction(null);
+    }
+  };
+
+  const probeInviteRoutes = async () => {
+    const invite = joinKey.trim();
+    if (!invite) return;
+    setRouteProbeState("running");
+    setRouteProbeError(null);
+    setRouteProbe(null);
+    try {
+      const result = await window.janjacord.connectivityRouteProbe(invite);
+      if (result.ok && result.data) setRouteProbe(result.data);
+      else setRouteProbeError(friendlyIpcError(result.error, "Não foi possível testar as rotas deste convite."));
+    } catch (error) {
+      setRouteProbeError(rejectedIpcError(error, "Não foi possível testar as rotas deste convite."));
+    } finally {
+      setRouteProbeState("idle");
     }
   };
 
@@ -750,8 +774,9 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
                   <p className="mt-1 text-xs leading-5 text-zinc-500">Cole o convite que o administrador enviou para você.</p>
                 </div>
               </div>
-              <input id="invite-key" className="mt-4 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm outline-none focus:border-sky-500" placeholder="JC4-..." value={joinKey} onChange={(event) => { setJoinKey(event.target.value); setLegacyChallenge(null); setJoinError(null); }} aria-invalid={Boolean(joinError)} aria-describedby={[joinError ? "invite-error" : null, legacyChallenge ? "legacy-fingerprint" : null].filter(Boolean).join(" ") || undefined} />
+              <input id="invite-key" className="mt-4 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2.5 font-mono text-sm outline-none focus:border-sky-500" placeholder="JC4-..." value={joinKey} onChange={(event) => { setJoinKey(event.target.value); setLegacyChallenge(null); setJoinError(null); setJoinDiagnostic(null); setRouteProbe(null); setRouteProbeError(null); }} aria-invalid={Boolean(joinError)} aria-describedby={[joinError ? "invite-error" : null, legacyChallenge ? "legacy-fingerprint" : null].filter(Boolean).join(" ") || undefined} />
               {joinError && <p id="invite-error" className="mt-2 text-xs leading-5 text-red-400" role="alert">{joinError}</p>}
+              {joinDiagnostic && <code className="mt-1.5 block select-all break-all rounded bg-zinc-950 px-2 py-1.5 font-mono text-[11px] leading-4 text-zinc-400">{joinDiagnostic}</code>}
               {legacyChallenge && legacyChallenge.invite === joinKey.trim() && (
                 <div id="legacy-fingerprint" className="mt-3 rounded-lg border border-amber-800/60 bg-amber-950/30 p-3">
                   <div className="flex items-start gap-2"><ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" aria-hidden /><div className="min-w-0"><p className="text-xs font-medium text-amber-200">Confirmação do host legado</p><p className="mt-1 text-xs leading-5 text-zinc-300">Compare esta fingerprint exatamente com a enviada pelo administrador:</p><code className="mt-2 block select-all break-all rounded bg-zinc-950 px-2 py-2 font-mono text-xs text-amber-100">{legacyChallenge.fingerprint}</code></div></div>
@@ -760,7 +785,37 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
               )}
               <button className="mt-3 w-full rounded-lg border border-zinc-600 py-2.5 text-sm font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50" onClick={() => void joinServer(false)} disabled={activeAction !== null || !joinKey.trim()}>{activeAction === "join" ? "Entrando na comunidade..." : "Entrar com convite"}</button>
               <button className="mt-3 flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-200" onClick={() => setShowAdvancedJoin((value) => !value)} aria-expanded={showAdvancedJoin} aria-controls="advanced-join-fields"><ChevronDown className={`h-3.5 w-3.5 transition-transform ${showAdvancedJoin ? "rotate-180" : ""}`} aria-hidden /> Diagnóstico avançado</button>
-              {showAdvancedJoin && <div id="advanced-join-fields" className="mt-2"><label className="sr-only" htmlFor="manual-host-endpoint">Endpoint manual do host</label><input id="manual-host-endpoint" className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-sky-500" placeholder="Endpoint manual do host" value={hostUrl} onChange={(event) => setHostUrl(event.target.value)} /></div>}
+              {showAdvancedJoin && (
+                <div id="advanced-join-fields" className="mt-2">
+                  <label className="sr-only" htmlFor="manual-host-endpoint">Endpoint manual do host</label>
+                  <input id="manual-host-endpoint" className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-sky-500" placeholder="Endpoint manual do host" value={hostUrl} onChange={(event) => setHostUrl(event.target.value)} />
+                  <button className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg border border-zinc-700 py-2 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50" onClick={() => void probeInviteRoutes()} disabled={routeProbeState === "running" || !joinKey.trim()}>
+                    {routeProbeState === "running" ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Wifi className="h-3.5 w-3.5" aria-hidden />}
+                    {routeProbeState === "running" ? "Testando as rotas deste convite..." : "Testar rotas deste convite nesta máquina"}
+                  </button>
+                  <p className="mt-1.5 text-[11px] leading-4 text-zinc-500">Mede DNS, TCP, TLS e WebSocket da rota a partir desta máquina — o mesmo caminho que o join usa. Não consome o convite.</p>
+                  {routeProbeError && <p className="mt-2 text-xs leading-5 text-amber-300" role="alert">{routeProbeError}</p>}
+                  {routeProbe && (
+                    <div role="status" aria-live="polite" className="mt-2">
+                      <p className={`text-[11px] font-medium ${routeProbe.reachable ? "text-emerald-400" : "text-red-400"}`}>
+                        {routeProbe.reachable ? "Rota alcançável desta máquina." : "Nenhuma rota foi alcançada desta máquina."}
+                      </p>
+                      <ul className="mt-1.5 space-y-1.5">
+                        {routeProbe.results.map((result) => (
+                          <li key={`${result.kind}:${result.endpoint}`} className="rounded-lg border border-zinc-800 bg-zinc-950/60 px-2.5 py-2">
+                            <div className="flex items-center gap-2">
+                              <span className={`text-xs ${result.ok ? "text-emerald-400" : "text-red-400"}`} aria-hidden>{result.ok ? "✓" : "✗"}</span>
+                              <span className="text-[11px] text-zinc-400">{result.kind}</span>
+                            </div>
+                            <code className="mt-1 block break-all font-mono text-[11px] text-zinc-300">{result.endpoint}</code>
+                            <code className="mt-1 block break-all font-mono text-[10px] leading-4 text-zinc-400">{result.diagnostic}</code>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="flex w-full items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-3 hover:border-zinc-700 hover:bg-zinc-900">

@@ -64,6 +64,25 @@ jobs:
         shell: pwsh
         run: pnpm install --frozen-lockfile
 
+      - name: Verify Windows trust store merges into Node default anchors
+        shell: pwsh
+        run: |
+          $script = @'
+          const tls = require("node:tls");
+          if (typeof tls.getCACertificates !== "function" || typeof tls.setDefaultCACertificates !== "function") {
+            throw new Error("node build without tls.getCACertificates/setDefaultCACertificates");
+          }
+          const system = tls.getCACertificates("system");
+          if (system.length === 0) throw new Error("Windows trust store reported no anchors");
+          tls.setDefaultCACertificates([...new Set([...system, ...tls.rootCertificates])]);
+          const merged = tls.getCACertificates("default").length;
+          if (merged <= tls.getCACertificates("bundled").length) {
+            throw new Error("merge did not widen the default anchors");
+          }
+          console.log("trust merge ok: system=" + system.length + " default=" + merged);
+          '@
+          node -e $script
+
       - name: Build workspace packages
         shell: pwsh
         run: pnpm build

@@ -5,12 +5,31 @@
  * O renderer é sandboxed (contextIsolation) — toda crypto passa por aqui.
  */
 import { app, BrowserWindow, clipboard, ipcMain, safeStorage, session, utilityProcess } from "electron";
+import tls from "node:tls";
 
-// Suites de segurança (Avast/AVG/Norton etc.) inspecionam HTTPS com certificado próprio,
-// instalado no cofre do Windows mas ausente do trust store embutido do Node/Electron — o
-// renderer conversa, mas conexões TLS do main process falham em silêncio e o join estoura
-// timeout. Confiar no cofre do sistema alinha o app ao comportamento do navegador.
-app.commandLine.appendSwitch("use-system-ca");
+// Suites de segurança (Avast/AVG/Norton etc.) e proxies corporativos inspecionam HTTPS com um
+// certificado próprio, confiado apenas pelo cofre do sistema operacional. O lado Node do Electron
+// verifica `wss://` com as raízes Mozilla embutidas, então essas conexões falham onde o navegador
+// passa. `--use-system-ca` não é suportado pelo Electron (electron/electron#45674) e
+// `app.commandLine.appendSwitch` não tem efeito nesse caminho: medido em Electron 43.3.0 /
+// Node 24.18.1 o switch mantém 120 âncoras, enquanto a chamada abaixo passa a usar também o cofre
+// do sistema (605 âncoras neste host). É o mesmo conjunto de confiança que o navegador da máquina
+// já aplica, restrito aos clientes TLS do processo principal. O resultado vira check do Doctor
+// para que a máquina de quem entra consiga provar o estado do cofre sem terminal.
+const trustStoreSummary = (() => {
+  try {
+    if (typeof tls.getCACertificates !== "function" || typeof tls.setDefaultCACertificates !== "function") {
+      return { active: false, system: 0, bundled: tls.rootCertificates.length, error: "Node sem tls.getCACertificates" };
+    }
+    const system = tls.getCACertificates("system");
+    tls.setDefaultCACertificates([...new Set([...system, ...tls.rootCertificates])]);
+    return { active: true, system: system.length, bundled: tls.rootCertificates.length };
+  } catch (error) {
+    // Sem o merge o app continua funcional em redes sem inspeção TLS; isto não pode impedir o boot.
+    console.warn(`[trust] cofre de certificados do sistema indisponível: ${error?.message ?? error}`);
+    return { active: false, system: 0, bundled: tls.rootCertificates.length, error: String(error?.message ?? error) };
+  }
+})();
 
 // userData custom: permite rodar 2+ instâncias no mesmo PC (teste de 2 contas)
 if (process.env.JC_USERDATA_DIR) {
@@ -41,7 +60,8 @@ import {
 import { createCipheriv, createDecipheriv, createHash, createHmac, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { durableAtomicWrite, ensureEncryptedDatabaseKey } from "./primary-host-profile.mjs";
 import { createProviderRegistry, PROVIDER_IDS } from "./connectivity/index.mjs";
-import { runConnectivityDoctor, parseAgentShares } from "./connectivity/doctor.mjs";
+import { runConnectivityDoctor, parseAgentShares, probeEdgeDetailed } from "./connectivity/doctor.mjs";
+import { classifyRouteFailure, describeRouteProbe, formatRouteDiagnostic } from "./connectivity/route-failure.mjs";
 import { LOCAL_PORT } from "./connectivity/shared.mjs";
 import { createSubprocessRunner } from "./connectivity/subprocess.mjs";
 import {
@@ -1354,7 +1374,7 @@ async function restartHostedServer() {
   const connectDeadline = Date.now() + 12_000;
   let connected = false;
   while (Date.now() < connectDeadline && hostProcess) {
-    connected = await connectToHost(`ws://127.0.0.1:${HOST_PORT}/signal`, trust, 1_500).catch(() => false);
+    connected = (await connectToHost(`ws://127.0.0.1:${HOST_PORT}/signal`, trust, 1_500).catch(() => ({ ok: false }))).ok;
     if (connected) break;
     const failedClient = client;
     try { failedClient?.close(); } catch { /* failed opening is already closed */ }
@@ -1550,6 +1570,57 @@ function persistedDirectTrust(trust) {
     .map((key) => [key, trust[key]]));
 }
 
+/**
+ * Diagnostica a rota que falhou, do ponto de vista DESTA máquina, e devolve o erro honesto para o
+ * renderer: código acionável + linha técnica para copiar. `ws://` puro fica sem probe porque o
+ * probe mede dns/tcp/tls/ws sobre `wss://`.
+ */
+async function routeFailureError(endpoint, failure) {
+  const probe = typeof endpoint === "string" && endpoint.startsWith("wss://")
+    ? await probeEdgeDetailed(endpoint, { timeoutMs: 8_000 }).catch(() => null)
+    : null;
+  return {
+    code: classifyRouteFailure(failure, probe),
+    message: failure?.code === "timeout"
+      ? "a rota respondeu, mas o host não completou o handshake no tempo esperado"
+      : `não foi possível abrir a rota da comunidade: ${failure?.message ?? "sem detalhe"}`,
+    data: { diagnostic: formatRouteDiagnostic(endpoint, failure, probe) },
+  };
+}
+
+/**
+ * Rotas que ESTA máquina tentaria ao usar o convite: diretas JC4 (host key pinada) e os endpoints
+ * de JanjaBridge usados em rendezvous/signaling. O doctor existente só enxerga o lado de quem
+ * hospeda; este conjunto permite diagnosticar do lado de quem entra, antes de gastar o convite.
+ */
+function inviteRouteTargets(inviteKey) {
+  const parsedV4 = parseInviteV4(inviteKey);
+  const parsedV3 = parsedV4 ? null : parseInviteV3(inviteKey);
+  if (!parsedV4 && !parsedV3) return [];
+  const targets = [];
+  for (const hint of parsedV4?.payload.directRouteHints ?? []) {
+    const endpoint = hint?.payload?.endpoint;
+    if (typeof endpoint === "string" && endpoint.startsWith("wss://")) {
+      targets.push({ kind: "rota direta", endpoint });
+    }
+  }
+  for (const hint of parsedV4?.payload.bridgeHints ?? parsedV3?.payload.bridgeHints ?? []) {
+    for (const endpoint of hint?.payload?.endpoints ?? []) {
+      if (typeof endpoint === "string" && endpoint.startsWith("wss://")) {
+        targets.push({ kind: "janjabridge", endpoint: bridgeWebSocketEndpoint(endpoint) });
+      }
+    }
+  }
+  return targets
+    .filter((target, index) => targets.findIndex((item) => item.endpoint === target.endpoint) === index)
+    .slice(0, 6);
+}
+
+/**
+ * Abre a sessão direta e devolve `{ ok, failure }`. O caller recebe a causa real da falha
+ * (ECONNREFUSED, ENOTFOUND, certificado rejeitado, timeout) em vez de um booleano que obrigava a
+ * inventar um motivo genérico.
+ */
 async function connectToHost(url, trust = {}, timeoutMs = 5000) {
   const nextClient = new HostClient(url, { identityId: identity.identityId, deviceSeed: identity.seed, ...trust });
   client = nextClient;
@@ -1558,7 +1629,7 @@ async function connectToHost(url, trust = {}, timeoutMs = 5000) {
   activeSessionRoute = { kind: "direct", endpoint: url, trust: persistedDirectTrust(trust) };
   bindClientEvents();
   const opened = await waitForClientOpen(timeoutMs, nextClient);
-  if (!opened && client === nextClient) {
+  if (!opened.ok && client === nextClient) {
     try { nextClient.close(); } catch { /* already closed */ }
     client = null;
     activeSessionEndpoint = null;
@@ -1673,10 +1744,31 @@ async function refreshServerState() {
   notifyRenderer("server.stateChanged", serverState);
 }
 
+/**
+ * Espera a abertura autenticada e devolve `{ ok, failure }`. Um fechamento antes do open é
+ * definitivo neste transporte: falha rápido com o erro real do socket em vez de consumir todo o
+ * orçamento e reportar um timeout que nunca aconteceu.
+ */
 function waitForClientOpen(timeoutMs, targetClient = client) {
   return new Promise((resolve) => {
-    targetClient.onOpen(() => resolve(true));
-    setTimeout(() => resolve(false), timeoutMs);
+    let settled = false;
+    let timer = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    timer = setTimeout(() => finish({
+      ok: false,
+      failure: { code: "timeout", message: `host não abriu a sessão em ${timeoutMs} ms` },
+    }), timeoutMs);
+    targetClient.onOpen(() => finish({ ok: true, failure: null }));
+    targetClient.onClose(() => finish({
+      ok: false,
+      failure: targetClient.connectionFailure?.()
+        ?? { code: "closed_before_open", message: "conexão encerrada antes do handshake" },
+    }));
   });
 }
 
@@ -1710,7 +1802,7 @@ async function openPrimaryCommunitySession(serverName = "Meu Servidor") {
   const deadline = Date.now() + 12_000;
   let connected = false;
   while (Date.now() < deadline && hostProcess) {
-    connected = await connectToHost(`ws://127.0.0.1:${HOST_PORT}/signal`, trust, 1_500).catch(() => false);
+    connected = (await connectToHost(`ws://127.0.0.1:${HOST_PORT}/signal`, trust, 1_500).catch(() => ({ ok: false }))).ok;
     if (connected) break;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
@@ -2056,11 +2148,16 @@ function registerIpc() {
       await new Promise((r) => setTimeout(r, 1500));
       const authoritySeed = deriveRuntimeSeed("janjacord-authority-signing-v1");
       const hostSeed = deriveRuntimeSeed("janjacord-host-signing-v1");
-      const connected = await connectToHost(`ws://127.0.0.1:${HOST_PORT}/signal`, {
+      const attempt = await connectToHost(`ws://127.0.0.1:${HOST_PORT}/signal`, {
         authorityFingerprint: ed25519Fingerprint(ed25519PublicKey(authoritySeed)),
         expectedHostPublicKey: ed25519PublicKey(hostSeed).toString("base64url"),
       });
-      if (!connected) throw Object.assign(new Error("host não respondeu"), { code: "host_offline" });
+      if (!attempt.ok) {
+        throw Object.assign(
+          new Error(`host local não abriu a sessão: ${attempt.failure?.message ?? "sem detalhe"}`),
+          { code: "host_offline", data: { diagnostic: formatRouteDiagnostic(`ws://127.0.0.1:${HOST_PORT}/signal`, attempt.failure, null) } },
+        );
+      }
       emitSetupStep("host", "done");
 
       emitSetupStep("direct", "running");
@@ -2153,23 +2250,23 @@ function registerIpc() {
         const routeUrl = typeof hint.payload.endpoint === "string" ? hint.payload.endpoint : "";
         if (!routeUrl.startsWith("wss://")) continue;
         try {
-          const connected = await connectToHost(routeUrl, {
+          const attempt = await connectToHost(routeUrl, {
             serverId: parsedV4.payload.serverId,
             authorityFingerprint: parsedV4.payload.authorityFingerprint,
             expectedHostPublicKey: hint.payload.hostPublicKey,
             expectedHostId: hint.payload.hostId,
           }, 15_000);
-          if (connected) {
+          if (attempt.ok) {
             target = null;
             lastDirectRouteError = null;
             break;
           }
-          lastDirectRouteError = { code: "timeout", message: "rota direta não abriu no tempo esperado" };
+          lastDirectRouteError = await routeFailureError(routeUrl, attempt.failure);
         } catch (error) {
-          lastDirectRouteError = {
+          lastDirectRouteError = await routeFailureError(routeUrl, {
             code: typeof error?.code === "string" && error.code ? error.code : "network_error",
-            message: "rota direta falhou antes do handshake completar",
-          };
+            message: error?.message ?? "rota direta falhou antes do handshake completar",
+          });
         }
       }
     }
@@ -2329,7 +2426,7 @@ function registerIpc() {
         return { ok: false, error: { code: "legacy_confirmation_required", message: "primeira observação do host expirou; tente novamente" } };
       }
       let exactLegacyMatch = false;
-      const connected = await connectToHost(target, parsedV3 ? {} : {
+      const attempt = await connectToHost(target, parsedV3 ? {} : {
         serverId: parsed.serverId,
         ...(persistedPin ? { expectedHostPublicKey: persistedPin } : {
           onLegacyHostFirstUse: async (candidate) => {
@@ -2342,7 +2439,7 @@ function registerIpc() {
           },
         }),
       });
-      if (!connected) return { ok: false, error: { code: "host_offline", message: "host não respondeu" } };
+      if (!attempt.ok) return { ok: false, error: await routeFailureError(target, attempt.failure) };
       if (!parsedV3 && !persistedPin) {
         if (!exactLegacyMatch) return { ok: false, error: { code: "unauthorized", message: "chave do host mudou entre observação e confirmação" } };
         const current = readConnectivityConfig();
@@ -2438,8 +2535,16 @@ function registerIpc() {
       }
       await closeActiveCommunitySession();
       const directTrust = savedRoute?.kind === "direct" ? savedRoute.trust : entry.trust;
-      const connected = await connectToHost(entry.endpoint, directTrust ?? { serverId: entry.serverId });
-      if (!connected || !client) throw Object.assign(new Error("host não respondeu"), { code: "host_offline" });
+      const attempt = await connectToHost(entry.endpoint, directTrust ?? { serverId: entry.serverId });
+      if (!attempt.ok || !client) {
+        throw Object.assign(
+          new Error(`host não respondeu: ${attempt.failure?.message ?? "sem detalhe"}`),
+          {
+            code: classifyRouteFailure(attempt.failure, null),
+            data: { diagnostic: formatRouteDiagnostic(entry.endpoint, attempt.failure, null) },
+          },
+        );
+      }
       client.send("hello", { identityId: identity.identityId });
       const stateRes = await new Promise((resolve) => {
         client.onEventOnce("result", (frame) => resolve(frame.data));
@@ -2805,6 +2910,27 @@ function registerIpc() {
       return { ok: false, error: { code: "unavailable", message: String(error?.message ?? error) } };
     }
   });
+  // Diagnóstico do lado de quem entra: mede as rotas do convite a partir DESTA máquina antes de
+  // consumir o join. Complementa o doctor, que só enxerga o lado de quem hospeda.
+  ipcMain.handle("connectivity.route.probe", async (_event, { inviteKey } = {}) => {
+    try {
+      if (typeof inviteKey !== "string" || !inviteKey.trim()) {
+        return { ok: false, error: { code: "invalid_invite", message: "Cole um convite para testar as rotas." } };
+      }
+      const targets = inviteRouteTargets(inviteKey.trim());
+      if (targets.length === 0) {
+        return { ok: false, error: { code: "no_route", message: "Este convite não traz rotas que esta máquina possa testar." } };
+      }
+      const results = [];
+      for (const target of targets) {
+        const probe = await probeEdgeDetailed(target.endpoint, { timeoutMs: 8_000 });
+        results.push({ ...describeRouteProbe(target.endpoint, probe), kind: target.kind });
+      }
+      return { ok: true, data: { reachable: results.some((result) => result.ok), results } };
+    } catch (error) {
+      return { ok: false, error: { code: "unavailable", message: String(error?.message ?? error) } };
+    }
+  });
   let doctorRunner = null;
   ipcMain.handle("connectivity.doctor", async () => {
     try {
@@ -2812,6 +2938,7 @@ function registerIpc() {
       const data = await runConnectivityDoctor({
         activeRoute: route,
         backendPort: LOCAL_PORT,
+        trustStore: trustStoreSummary,
         runAgentStatus: route?.provider === "zrok" ? async () => {
           doctorRunner ??= createSubprocessRunner({ spawn: nodeSpawn, execFile: nodeExecFile });
           try {

@@ -73,6 +73,16 @@ export interface AuthenticatedOpenEvent {
   reconnected: boolean;
 }
 
+/**
+ * Falha de transporte observada antes da abertura autenticada. `code` preserva o código do Node/ws
+ * (ECONNREFUSED, ENOTFOUND, DEPTH_ZERO_SELF_SIGNED_CERT, …) para o caller transformar em mensagem
+ * acionável em vez de um timeout genérico.
+ */
+export interface HostTransportFailure {
+  code: string;
+  message: string;
+}
+
 /** Cliente WebSocket do host (signaling `{event,data}`, path /signal). */
 export interface LegacyHostFirstUseCandidate {
   hostPublicKey: string;
@@ -149,6 +159,7 @@ export class HostClient implements Transport {
   private closeHandlers = new Set<() => void>();
   private pendingRequests: PendingHostClientRequest[] = [];
   private inFlightRequest: PendingHostClientRequest | null = null;
+  private transportFailure: HostTransportFailure | null = null;
 
   constructor(
     private readonly url: string,
@@ -293,10 +304,26 @@ export class HostClient implements Transport {
       }
     });
     // `ws` emits `error` before `close` for ordinary host loss (ECONNRESET/REFUSED). Without
-    // a listener Node treats that network condition as an uncaught process exception.
-    socket.on("error", () => undefined);
-    socket.on("close", () => {
+    // a listener Node treats that network condition as an uncaught process exception. The failure
+    // is also kept so callers can report the real cause (TLS rejected, DNS, refused) instead of
+    // falling back to a generic timeout.
+    socket.on("error", (error) => {
+      if (generation !== this.socketGeneration || this.closed || this.authenticated) return;
+      const failure = error as { code?: unknown; message?: unknown } | null;
+      this.recordTransportFailure(
+        typeof failure?.code === "string" ? failure.code : "",
+        typeof failure?.message === "string" ? failure.message : "",
+      );
+    });
+    socket.on("close", (code, reason) => {
       if (generation !== this.socketGeneration) return;
+      if (!this.authenticated) {
+        const text = reason?.length ? Buffer.from(reason).toString("utf8") : "";
+        this.recordTransportFailure(
+          code === 1006 ? "closed_before_open" : `closed_${code}`,
+          text || "connection closed before the handshake completed",
+        );
+      }
       this.closed = true;
       this.authenticated = false;
       this.challengeVerified = false;
@@ -485,6 +512,23 @@ export class HostClient implements Transport {
 
   onClose(handler: () => void): void {
     this.closeHandlers.add(handler);
+  }
+
+  /**
+   * Motivo da última falha de transporte observada antes da abertura autenticada.
+   * `null` quando nada falhou (ou quando a conexão chegou a autenticar).
+   */
+  connectionFailure(): HostTransportFailure | null {
+    return this.transportFailure;
+  }
+
+  private recordTransportFailure(code: string, message: string): void {
+    // O primeiro erro é o mais específico: um `close` seguinte não deve sobrescrever `ECONNREFUSED`.
+    if (this.transportFailure) return;
+    this.transportFailure = {
+      code: code || "network_error",
+      message: message || "unidentified network failure",
+    };
   }
 
   close(): void {

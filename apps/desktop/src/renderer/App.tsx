@@ -24,6 +24,7 @@ interface WindowApi {
   connectivityProviderStop: () => Promise<{ ok: boolean; data?: { stopped: boolean }; error?: IpcError }>;
   connectivityDoctor: () => Promise<{ ok: boolean; data?: ConnectivityDoctorReport; error?: IpcError }>;
   connectivityDoctorCleanup: () => Promise<{ ok: boolean; data?: { deleted: string[] }; error?: IpcError }>;
+  connectivityRouteProbe: (inviteKey: string) => Promise<{ ok: boolean; data?: { reachable: boolean; results: RouteProbeResult[] }; error?: IpcError }>;
   iceConfiguration: () => Promise<{ ok: boolean; data?: { iceServers: RTCIceServer[]; iceTransportPolicy: "all" | "relay"; expiresAt?: number }; error?: IpcError }>;
   bridgeAdd: (pairingCode: string) => Promise<{ ok: boolean; data?: { bridgeId: string; endpoint: string; expiresAt: number; warning?: string }; error?: IpcError }>;
   bridgeRemove: (bridgeId: string) => Promise<{ ok: boolean; error?: { message: string } }>;
@@ -88,6 +89,18 @@ export interface ConnectivityDoctorReport {
   checks: ConnectivityDoctorCheck[];
   hints: string[];
   zombies?: string[];
+}
+
+/** Resultado do teste de rota do convite feito na máquina de quem entra. */
+export interface RouteProbeResult {
+  kind: string;
+  endpoint: string;
+  ok: boolean;
+  status: number | null;
+  phases: Record<string, number>;
+  error: string | null;
+  code: string;
+  diagnostic: string;
 }
 
 export interface CommunitySummary {

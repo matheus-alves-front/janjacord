@@ -81,6 +81,28 @@ describe("connectivity doctor", () => {
     expect(report.checks.find((check) => check.id === "agent")).toBeUndefined();
     expect(report.overall).toBe("degraded"); // host caiu, mas rota ok
   });
+
+  it("reports the OS trust store so an intercepted-TLS machine can prove its state", async () => {
+    const healthy = await runConnectivityDoctor({
+      activeRoute: { provider: "manual", endpoint: "wss://chat.example.com/signal" },
+      backendPort: 1,
+      probe: async () => ({ ok: true, status: 101, total: 50, phases: {} }),
+      trustStore: { active: true, system: 605, bundled: 120 },
+    });
+    expect(healthy.checks.find((check) => check.id === "trust")).toMatchObject({
+      ok: true,
+      detail: "cofre do sistema em uso · 605 âncoras do sistema + 120 embutidas",
+    });
+
+    const unavailable = await runConnectivityDoctor({
+      activeRoute: { provider: "manual", endpoint: "wss://chat.example.com/signal" },
+      backendPort: 1,
+      probe: async () => ({ ok: true, status: 101, total: 50, phases: {} }),
+      trustStore: { active: false, system: 0, bundled: 120, error: "certutil indisponível" },
+    });
+    expect(unavailable.checks.find((check) => check.id === "trust")?.ok).toBe(false);
+    expect(unavailable.hints.join("\n")).toMatch(/inspeciona HTTPS/i);
+  });
 });
 
 describe("edge probe failure shape", () => {
