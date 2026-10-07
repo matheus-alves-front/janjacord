@@ -38,6 +38,9 @@ const FRIENDLY_MESSAGES: Record<string, string> = {
   route_missing: "A rota publicada no convite não existe mais no provedor — peça um convite novo.",
   route_backend_down: "A rota existe, mas o host atrás dela não está respondendo. Confirme se o app do host está aberto.",
   route_failed: "Não foi possível abrir a rota da comunidade. Veja o detalhe técnico abaixo.",
+  host_identity_mismatch: "O host atrás desta rota não é o host deste convite (comunidade, chave ou identidade diferentes). A rota pode estar apontando para outra instância do JanjaCord — no app do host, abra Configurações → Conectividade → Diagnosticar agora e confira o check \"Rota publicada entrega este host\".",
+  route_delivers_other_host: "Esta rota já entrega outro host. Feche outra instância do JanjaCord que possa estar usando a mesma porta ou túnel, desligue e ative a rota de novo (só então gere um convite novo).",
+  local_port_foreign_host: "A porta local do host (8931) está respondendo com outro host do JanjaCord — outra instância ou uma versão antiga do app está segurando essa porta. Feche as outras instâncias e reabra o JanjaCord.",
   rate_limited: "Foram feitas muitas tentativas. Aguarde um momento e tente novamente.",
   legacy_confirmation_required: "Confira a fingerprint do host antes de continuar.",
 };

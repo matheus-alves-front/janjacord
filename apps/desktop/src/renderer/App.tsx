@@ -48,7 +48,7 @@ interface WindowApi {
   listInvites: () => Promise<{ ok: boolean; data?: unknown[]; error?: { message: string } }>;
   revokeInvite: (inviteId: string) => Promise<{ ok: boolean; error?: { message: string } }>;
   channelCreate: (channelType: "text" | "call", name: string) => Promise<{ ok: boolean; error?: { message: string } }>;
-  inviteCreate: () => Promise<{ ok: boolean; data?: { inviteId: string; inviteKey: string }; error?: { message: string } }>;
+  inviteCreate: () => Promise<{ ok: boolean; data?: { inviteId: string; inviteKey: string; warning?: string }; error?: { message: string } }>;
   clipboardWriteText: (text: string) => Promise<{ ok: boolean; data?: { written: boolean }; error?: { code?: string; message: string } }>;
   clipboardClearIfEquals: (text: string) => Promise<{ ok: boolean; data?: { cleared: boolean }; error?: { message: string } }>;
   hostUrl: () => Promise<string>;

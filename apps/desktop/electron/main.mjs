@@ -62,6 +62,7 @@ import { durableAtomicWrite, ensureEncryptedDatabaseKey } from "./primary-host-p
 import { createProviderRegistry, PROVIDER_IDS } from "./connectivity/index.mjs";
 import { runConnectivityDoctor, parseAgentShares, probeEdgeDetailed } from "./connectivity/doctor.mjs";
 import { classifyRouteFailure, describeRouteProbe, formatRouteDiagnostic } from "./connectivity/route-failure.mjs";
+import { probePublishedHostIdentity, shortIdentity } from "./connectivity/host-identity.mjs";
 import { LOCAL_PORT } from "./connectivity/shared.mjs";
 import { createSubprocessRunner } from "./connectivity/subprocess.mjs";
 import {
@@ -658,7 +659,7 @@ function providerRouteEndpoint(endpoint) {
 
 async function probeProviderRoute(endpoint, timeoutMs = 15_000) {
   const ws = createExternalWebSocket(endpoint);
-  return new Promise((resolve, reject) => {
+  await new Promise((resolve, reject) => {
     let settled = false;
     const finish = (error) => {
       if (settled) return;
@@ -673,6 +674,17 @@ async function probeProviderRoute(endpoint, timeoutMs = 15_000) {
     ws.once("open", () => finish());
     ws.once("error", () => finish(Object.assign(new Error("não foi possível validar DNS, TLS e WebSocket"), { code: "wss_failed" })));
   });
+  // Um 101 só prova que há um WebSocket atrás da URL. Ativar uma rota que já entrega OUTRO host é
+  // a armadilha que produz convites impossíveis de aceitar ("invalid host authority" no join), então
+  // a identidade é conferida aqui, no momento em que a rota fica pública.
+  const published = await verifyPublishedHostIdentity(endpoint, timeoutMs);
+  if (published.identityMismatch) {
+    throw Object.assign(new Error(
+      `esta rota está entregando outro host (${published.reason}): recebido ${shortIdentity(published.hostId ?? published.hostPublicKey)}. `
+      + "Feche outra instância do JanjaCord que possa estar usando a mesma porta/túnel e ative a rota de novo.",
+    ), { code: "route_delivers_other_host" });
+  }
+  return true;
 }
 
 function publicProviderRoute(provider, status) {
@@ -1571,6 +1583,40 @@ function persistedDirectTrust(trust) {
 }
 
 /**
+ * Identidade que ESTE app espera ver do outro lado da própria rota. A chave vem do mesmo seed
+ * derivado que o host recebe; o hostId é lido do estado real do host (grant aceito com essa chave)
+ * em vez de recalculado, para não duplicar a fórmula do host.
+ */
+function expectedHostIdentity() {
+  if (!identity) return null;
+  const hostPublicKey = ed25519PublicKey(deriveRuntimeSeed("janjacord-host-signing-v1")).toString("base64url");
+  const grants = serverState?.hostGrants;
+  const grant = Array.isArray(grants)
+    ? grants.find((entry) => entry?.hostPublicKey === hostPublicKey && entry?.status === "accepted")
+    : null;
+  return { hostPublicKey, hostId: typeof grant?.hostId === "string" ? grant.hostId : null };
+}
+
+/**
+ * Verifica se a rota publicada está entregando este host. Roda com chave efêmera e não autentica:
+ * o desafio do host é emitido antes de qualquer vínculo de membro.
+ */
+async function verifyPublishedHostIdentity(endpoint, timeoutMs = 10_000) {
+  const expected = expectedHostIdentity();
+  if (!expected) return { ok: false, reason: "no_local_host_identity", identityMismatch: false, hostPublicKey: null, hostId: null };
+  const probeSeed = randomBytes(32);
+  return probePublishedHostIdentity({
+    endpoint,
+    openSocket: createExternalWebSocket,
+    probeIdentityId: randomUUID(),
+    probePublicKey: ed25519PublicKey(probeSeed).toString("base64url"),
+    expectedHostPublicKey: expected.hostPublicKey,
+    expectedHostId: expected.hostId,
+    timeoutMs,
+  });
+}
+
+/**
  * Diagnostica a rota que falhou, do ponto de vista DESTA máquina, e devolve o erro honesto para o
  * renderer: código acionável + linha técnica para copiar. `ws://` puro fica sem probe porque o
  * probe mede dns/tcp/tls/ws sobre `wss://`.
@@ -1614,6 +1660,36 @@ function inviteRouteTargets(inviteKey) {
   return targets
     .filter((target, index) => targets.findIndex((item) => item.endpoint === target.endpoint) === index)
     .slice(0, 6);
+}
+
+/**
+ * Valida o convite recém-gerado contra a realidade antes de ele ser compartilhado.
+ *
+ * As rotas viajam dentro do convite (directRouteHints). Se o host ainda carrega o env de uma rota
+ * antiga — ou se a share publicada está entregando outro processo — o convite nasce inválido e o
+ * único sintoma aparece do outro lado, como "invalid host authority". É barato conferir aqui:
+ * comparar o endpoint do convite com a rota ativa (local, exato) e perguntar à rota quem responde.
+ */
+async function inviteRouteWarning(inviteKey) {
+  if (typeof inviteKey !== "string") return null;
+  const targets = inviteRouteTargets(inviteKey);
+  if (targets.length === 0) return null; // convite sem rota direta: nada a validar localmente
+  const hint = targets[0];
+  const activeEndpoint = readConnectivityConfig().activeRoute?.endpoint ?? null;
+  if (activeEndpoint && hint.endpoint !== activeEndpoint) {
+    return `Este convite aponta para ${hint.endpoint}, mas a rota ativa agora é ${activeEndpoint}. `
+      + "O host ainda está com a rota anterior: desligue e ative a rota de novo (ou reabra o app) e gere outro convite.";
+  }
+  const expected = expectedHostIdentity();
+  if (!expected) return null;
+  const probe = await verifyPublishedHostIdentity(hint.endpoint, 6_000);
+  if (probe.ok) return null;
+  if (probe.identityMismatch) {
+    return `A rota deste convite (${hint.endpoint}) está entregando outro host (${probe.reason}). `
+      + "Antes de compartilhar, confirme em Configurações → Conectividade → Diagnosticar agora que \"Rota publicada entrega este host\" está verde.";
+  }
+  return `Não foi possível confirmar o host atrás de ${hint.endpoint} (${probe.reason}). `
+    + "Confirme a rota em Configurações → Conectividade → Diagnosticar agora antes de compartilhar este convite.";
 }
 
 /**
@@ -2153,9 +2229,15 @@ function registerIpc() {
         expectedHostPublicKey: ed25519PublicKey(hostSeed).toString("base64url"),
       });
       if (!attempt.ok) {
+        const collision = attempt.failure?.message?.includes("invalid host authority");
         throw Object.assign(
-          new Error(`host local não abriu a sessão: ${attempt.failure?.message ?? "sem detalhe"}`),
-          { code: "host_offline", data: { diagnostic: formatRouteDiagnostic(`ws://127.0.0.1:${HOST_PORT}/signal`, attempt.failure, null) } },
+          new Error(collision
+            ? `a porta local ${HOST_PORT} está respondendo com outro host do JanjaCord (${attempt.failure?.message}). Feche a outra instância/versão do app e reabra: esta comunidade não pode dividir a porta com outro host.`
+            : `host local não abriu a sessão: ${attempt.failure?.message ?? "sem detalhe"}`),
+          {
+            code: collision ? "local_port_foreign_host" : "host_offline",
+            data: { diagnostic: formatRouteDiagnostic(`ws://127.0.0.1:${HOST_PORT}/signal`, attempt.failure, null) },
+          },
         );
       }
       emitSetupStep("host", "done");
@@ -2606,7 +2688,10 @@ function registerIpc() {
   });
 
   ipcMain.handle("invite.create", async () => {
-    return sendCommand({ type: "invite.create", initialRoleId: "role-member", maxUses: 1 });
+    const minted = await sendCommand({ type: "invite.create", initialRoleId: "role-member", maxUses: 1 });
+    if (!minted?.ok) return minted;
+    const warning = await inviteRouteWarning(minted.data?.inviteKey);
+    return warning ? { ...minted, data: { ...minted.data, warning } } : minted;
   });
 
   ipcMain.handle("clipboard.writeText", (_e, { text }) => {
@@ -2939,6 +3024,9 @@ function registerIpc() {
         activeRoute: route,
         backendPort: LOCAL_PORT,
         trustStore: trustStoreSummary,
+        verifyPublishedHost: route?.endpoint
+          ? () => verifyPublishedHostIdentity(route.endpoint)
+          : null,
         runAgentStatus: route?.provider === "zrok" ? async () => {
           doctorRunner ??= createSubprocessRunner({ spawn: nodeSpawn, execFile: nodeExecFile });
           try {

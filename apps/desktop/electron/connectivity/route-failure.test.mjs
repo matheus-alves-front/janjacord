@@ -22,6 +22,16 @@ describe("route failure classification", () => {
       .toBe("route_unreachable");
   });
 
+  it("distinguishes a route delivering another host from a network failure", () => {
+    // O host respondeu e assinou: o problema não é rede, é identidade.
+    expect(classifyRouteFailure(
+      { code: "closed_1008", message: "invalid host authority: host_public_key" },
+      { ok: false, status: null, error: null, phases: { dns: 2, tcp: 11, tls: 495, ws: 408 } },
+    )).toBe("host_identity_mismatch");
+    expect(classifyRouteFailure({ code: "closed_1008", message: "invalid host authority: authority_fingerprint" }, null))
+      .toBe("host_identity_mismatch");
+  });
+
   it("reads the edge status when the transport stayed silent", () => {
     const silent = { code: "closed_before_open", message: "connection closed before the handshake completed" };
     expect(classifyRouteFailure(silent, { status: 404 })).toBe("route_missing");

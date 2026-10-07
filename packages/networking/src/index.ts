@@ -3,7 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import nodeDataChannel, { type DataChannel, type IceServer, type PeerConnection } from "node-datachannel";
 import { HostRegistrationSchema, SignedIceAccessProofSchema, type HostCommand, type HostEvent, type ErrorCode, type HostRegistration, type SignedIceAccessProof } from "@janjacord/schemas";
 import { ed25519Fingerprint, ed25519PublicKey, signCanonicalPayload } from "@janjacord/crypto";
-import { createSignedSessionAuth, hostRegistrationRecordHash, verifySignedHostAuthChallenge } from "@janjacord/protocol";
+import { createSignedSessionAuth, hostAuthChallengeMismatch, hostRegistrationRecordHash, verifySignedHostAuthChallenge } from "@janjacord/protocol";
 import { verifyHostAuthenticationContext, type VerifiedHostAuthenticationContext } from "./connectivity.js";
 
 export * from "./connectivity.js";
@@ -266,7 +266,16 @@ export class HostClient implements Transport {
             }
           }
           if (!verified) {
-            socket.close(1008, "invalid host authority");
+            // Dizer QUAL campo divergiu: "invalid host authority" sozinho não separa comunidade
+            // errada, authority diferente, chave de host trocada ou túnel entregando outro host.
+            const mismatch = hostAuthChallengeMismatch(frame.data, {
+              serverId: this.auth.serverId,
+              authorityFingerprint: this.auth.authorityFingerprint,
+              hostPublicKey: this.hostTrust?.hostPublicKey,
+              hostId: this.hostTrust?.hostId || undefined,
+              grantId: this.hostTrust?.grantId || undefined,
+            });
+            socket.close(1008, `invalid host authority: ${mismatch ?? "unknown"}`);
             return;
           }
           this.challengeVerified = true;

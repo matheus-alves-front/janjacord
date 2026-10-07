@@ -359,6 +359,59 @@ export function createSignedHostAuthChallenge(
   return SignedHostAuthChallengeSchema.parse(signPayload(hostSeed, SIGNATURE_DOMAINS.hostAuthChallenge, parsed));
 }
 
+/**
+ * Motivo da rejeição do desafio do host, campo por campo. Um join recusado como "invalid host
+ * authority" era indistinguível entre comunidade, authority, chave do host e hostId — e diagnosticar
+ * isso do lado de quem entra exigia adivinhar.
+ */
+export type HostAuthChallengeMismatch =
+  | "malformed"
+  | "expired"
+  | "issued_in_future"
+  | "server_id"
+  | "authority_fingerprint"
+  | "host_public_key"
+  | "host_id"
+  | "grant_id"
+  | "signature";
+
+function challengeMismatchFromParsed(
+  parsed: SignedHostAuthChallenge,
+  expected: {
+    serverId?: string;
+    authorityFingerprint?: string;
+    hostPublicKey?: string;
+    hostId?: string;
+    grantId?: string;
+  },
+  now: number,
+): HostAuthChallengeMismatch | null {
+  if (parsed.payload.expiresAt <= now) return "expired";
+  if (parsed.payload.issuedAt > now + 5_000) return "issued_in_future";
+  if (expected.serverId && parsed.payload.serverId !== expected.serverId) return "server_id";
+  if (expected.authorityFingerprint && parsed.payload.authorityFingerprint !== expected.authorityFingerprint.toLowerCase()) return "authority_fingerprint";
+  if (expected.hostPublicKey && parsed.publicKey !== expected.hostPublicKey) return "host_public_key";
+  if (expected.hostId && parsed.payload.hostId !== expected.hostId) return "host_id";
+  if (expected.grantId && parsed.payload.grantId !== expected.grantId) return "grant_id";
+  return verifySigned(SIGNATURE_DOMAINS.hostAuthChallenge, parsed) ? null : "signature";
+}
+
+export function hostAuthChallengeMismatch(
+  value: unknown,
+  expected: {
+    serverId?: string;
+    authorityFingerprint?: string;
+    hostPublicKey?: string;
+    hostId?: string;
+    grantId?: string;
+  },
+  now = Date.now(),
+): HostAuthChallengeMismatch | null {
+  const parsed = SignedHostAuthChallengeSchema.safeParse(value);
+  if (!parsed.success) return "malformed";
+  return challengeMismatchFromParsed(parsed.data, expected, now);
+}
+
 export function verifySignedHostAuthChallenge(value: unknown, expected: {
   serverId?: string;
   authorityFingerprint?: string;
@@ -367,13 +420,8 @@ export function verifySignedHostAuthChallenge(value: unknown, expected: {
   grantId?: string;
 }, now = Date.now()): SignedHostAuthChallenge | null {
   const parsed = SignedHostAuthChallengeSchema.safeParse(value);
-  if (!parsed.success || parsed.data.payload.expiresAt <= now || parsed.data.payload.issuedAt > now + 5_000) return null;
-  if (expected.serverId && parsed.data.payload.serverId !== expected.serverId) return null;
-  if (expected.authorityFingerprint && parsed.data.payload.authorityFingerprint !== expected.authorityFingerprint.toLowerCase()) return null;
-  if (expected.hostPublicKey && parsed.data.publicKey !== expected.hostPublicKey) return null;
-  if (expected.hostId && parsed.data.payload.hostId !== expected.hostId) return null;
-  if (expected.grantId && parsed.data.payload.grantId !== expected.grantId) return null;
-  return verifySigned(SIGNATURE_DOMAINS.hostAuthChallenge, parsed.data) ? parsed.data : null;
+  if (!parsed.success || challengeMismatchFromParsed(parsed.data, expected, now) !== null) return null;
+  return parsed.data;
 }
 
 /**

@@ -13,6 +13,7 @@ import {
   createSignedSessionAuth,
   formatInviteV3,
   formatInviteV4,
+  hostAuthChallengeMismatch,
   hostRegistrationRecordHash,
   parseInviteV3,
   parseInviteV4,
@@ -235,6 +236,43 @@ describe("connectivity signatures", () => {
     expect(verifySignedHostAuthChallenge(challenge, expected, now + 1)).not.toBeNull();
     expect(verifySignedHostAuthChallenge(challenge, { ...expected, grantId: "44444444-4444-4444-8444-444444444444" }, now + 1)).toBeNull();
     expect(verifySignedHostAuthChallenge(challenge, { ...expected, hostPublicKey: ed25519PublicKey(authoritySeed).toString("base64url") }, now + 1)).toBeNull();
+  });
+
+  it("names which field rejected a host challenge so a refused join is diagnosable", () => {
+    const now = 110_000;
+    const challenge = createSignedHostAuthChallenge({
+      version: 1,
+      serverId: SERVER_ID,
+      authorityFingerprint: ed25519Fingerprint(ed25519PublicKey(authoritySeed)),
+      hostId: "member-device",
+      grantId: GRANT_ID,
+      challengeId: "33333333-3333-4333-8333-333333333333",
+      nonce: Buffer.alloc(32, 7).toString("base64url"),
+      issuedAt: now,
+      expiresAt: now + 30_000,
+    }, hostSeed);
+    const expected = {
+      serverId: SERVER_ID,
+      authorityFingerprint: ed25519Fingerprint(ed25519PublicKey(authoritySeed)),
+      hostPublicKey: ed25519PublicKey(hostSeed).toString("base64url"),
+      hostId: "member-device",
+      grantId: GRANT_ID,
+    };
+    expect(hostAuthChallengeMismatch(challenge, expected, now + 1)).toBeNull();
+    expect(hostAuthChallengeMismatch(challenge, { ...expected, serverId: "99999999-9999-4999-8999-999999999999" }, now + 1)).toBe("server_id");
+    expect(hostAuthChallengeMismatch(challenge, { ...expected, authorityFingerprint: "00".repeat(32) }, now + 1)).toBe("authority_fingerprint");
+    expect(hostAuthChallengeMismatch(challenge, { ...expected, hostPublicKey: ed25519PublicKey(authoritySeed).toString("base64url") }, now + 1)).toBe("host_public_key");
+    expect(hostAuthChallengeMismatch(challenge, { ...expected, hostId: "outro-host" }, now + 1)).toBe("host_id");
+    expect(hostAuthChallengeMismatch(challenge, { ...expected, grantId: "99999999-9999-4999-8999-999999999999" }, now + 1)).toBe("grant_id");
+    expect(hostAuthChallengeMismatch(challenge, expected, now + 30_001)).toBe("expired");
+    expect(hostAuthChallengeMismatch({ nonsense: true }, expected, now + 1)).toBe("malformed");
+    // Envelope adulterado depois de assinado: nenhum campo declarado difere, mas a assinatura não fecha.
+    const tampered = structuredClone(challenge);
+    tampered.payload.nonce = Buffer.alloc(32, 11).toString("base64url");
+    expect(hostAuthChallengeMismatch(tampered, { serverId: SERVER_ID }, now + 1)).toBe("signature");
+    // `verify` continua a mesma fonte de verdade: qualquer motivo invalida o desafio.
+    expect(verifySignedHostAuthChallenge(challenge, { ...expected, hostId: "outro-host" }, now + 1)).toBeNull();
+    expect(verifySignedHostAuthChallenge(tampered, { serverId: SERVER_ID }, now + 1)).toBeNull();
   });
 
   it("proves live bridge registration with the host key and exact pending record hash", () => {

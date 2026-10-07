@@ -82,6 +82,59 @@ describe("connectivity doctor", () => {
     expect(report.overall).toBe("degraded"); // host caiu, mas rota ok
   });
 
+  it("flags shares from earlier activations that are still published", async () => {
+    const report = await runConnectivityDoctor({
+      activeRoute: { provider: "zrok", endpoint: "wss://funcionafdp.shares.zrok.io/signal" },
+      backendPort: 1,
+      runAgentStatus: async () => [
+        "SHARES",
+        "│ err_kDLPnE6Y │ public     │ proxy │                            │ http://127.0.0.1:8931 │ \x1b[33mretrying\x1b[0m │",
+        "│ j7a5jv1h9sqw │ public     │ proxy │ funcionafdp.shares.zrok.io │ http://127.0.0.1:8931 │ \x1b[32mactive\x1b[0m   │",
+        "│ xwjmzzf7ercu │ public     │ proxy │ fellasss.shares.zrok.io    │ http://127.0.0.1:8931 │ \x1b[32mactive\x1b[0m   │",
+      ].join("\n"),
+      probe: async () => ({ ok: true, status: 101, total: 20, phases: {} }),
+    });
+    const check = report.checks.find((entry) => entry.id === "stale_shares");
+    expect(check?.ok).toBe(false);
+    expect(check?.detail).toBe("fellasss.shares.zrok.io (token xwjmzzf7ercu)");
+    expect(report.hints.join("\n")).toMatch(/ativações antigas/);
+    expect(report.zombies).toEqual(["err_kDLPnE6Y"]);
+    // A share atual não é reportada como antiga, e a rota continua verde.
+    expect(report.checks.find((entry) => entry.id === "agent")?.ok).toBe(true);
+    expect(report.checks.find((entry) => entry.id === "edge")?.ok).toBe(true);
+  });
+
+  it("reports whether the published route delivers this host", async () => {
+    const healthy = await runConnectivityDoctor({
+      activeRoute: { provider: "zrok", endpoint: "wss://fellasss.shares.zrok.io/signal" },
+      backendPort: 1,
+      probe: async () => ({ ok: true, status: 101, total: 20, phases: {} }),
+      verifyPublishedHost: async () => ({ ok: true, reason: null, identityMismatch: false, hostId: "primary-abc123" }),
+    });
+    expect(healthy.checks.find((check) => check.id === "published_host")).toMatchObject({
+      ok: true,
+      detail: "desafio assinado por este host (primary-abc123)",
+    });
+
+    // Rota no ar entregando OUTRO host: é o caso que produz convites impossíveis de aceitar.
+    const foreign = await runConnectivityDoctor({
+      activeRoute: { provider: "zrok", endpoint: "wss://fellasss.shares.zrok.io/signal" },
+      backendPort: 1,
+      probe: async () => ({ ok: true, status: 101, total: 20, phases: {} }),
+      verifyPublishedHost: async () => ({
+        ok: false,
+        reason: "host_public_key",
+        identityMismatch: true,
+        hostId: "primary-outra-instancia",
+        hostPublicKey: "outra-chave",
+      }),
+    });
+    const check = foreign.checks.find((entry) => entry.id === "published_host");
+    expect(check?.ok).toBe(false);
+    expect(check?.detail).toContain("outro host responde por esta rota (host_public_key)");
+    expect(foreign.hints.join("\n")).toMatch(/outra instância/i);
+  });
+
   it("reports the OS trust store so an intercepted-TLS machine can prove its state", async () => {
     const healthy = await runConnectivityDoctor({
       activeRoute: { provider: "manual", endpoint: "wss://chat.example.com/signal" },

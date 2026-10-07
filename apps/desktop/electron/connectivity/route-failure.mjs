@@ -8,6 +8,9 @@
  */
 
 const TLS_FAILURE_PATTERN = /DEPTH_ZERO_SELF_SIGNED|SELF_SIGNED_CERT|UNABLE_TO_VERIFY_LEAF|UNABLE_TO_GET_ISSUER|CERT_HAS_EXPIRED|CERT_UNTRUSTED|CERT_REVOKED|ERR_TLS_CERT|ERR_SSL|certificate/i;
+// O host respondeu, mas não é o host do convite (comunidade/authority/chave/hostId diferentes).
+// Não é problema de rede: é a rota entregando outro processo.
+const HOST_IDENTITY_PATTERN = /invalid host authority/i;
 const DNS_FAILURE_PATTERN = /ENOTFOUND|EAI_AGAIN|EAI_FAIL|dns_empty|getaddrinfo/i;
 const REFUSED_FAILURE_PATTERN = /ECONNREFUSED|tcp_refused/i;
 const UNREACHABLE_FAILURE_PATTERN = /ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ECONNRESET|EPIPE/i;
@@ -22,6 +25,7 @@ export function classifyRouteFailure(failure, probe) {
   const message = typeof failure?.message === "string" ? failure.message : "";
   const probeError = typeof probe?.error === "string" ? probe.error : "";
   const signal = [code, message, probeError].filter(Boolean).join(" ");
+  if (HOST_IDENTITY_PATTERN.test(signal)) return "host_identity_mismatch";
   if (TLS_FAILURE_PATTERN.test(signal)) return "route_tls_blocked";
   if (DNS_FAILURE_PATTERN.test(signal)) return "route_dns";
   if (REFUSED_FAILURE_PATTERN.test(signal)) return "route_refused";

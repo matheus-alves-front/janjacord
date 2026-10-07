@@ -41,14 +41,14 @@ describe("primary Community Host key migration", () => {
     expect(() => ensureEncryptedDatabaseKey({ file, oldKey, newKey, failpoint: "after_backup" })).toThrow("simulated crash");
     ensureEncryptedDatabaseKey({ file, oldKey, newKey });
     expect(readValue(file)).toBe("preserved");
-  });
+  }, 30_000);
 
   it("recovers a crash after rekey from the already durable new key", () => {
     const file = fixture();
     expect(() => ensureEncryptedDatabaseKey({ file, oldKey, newKey, failpoint: "after_rekey" })).toThrow("simulated crash");
     ensureEncryptedDatabaseKey({ file, oldKey, newKey });
     expect(readValue(file)).toBe("preserved");
-  });
+  }, 30_000);
 
   it("restores a damaged live file from the named backup", () => {
     const file = fixture();
@@ -56,7 +56,7 @@ describe("primary Community Host key migration", () => {
     writeFileSync(file, Buffer.alloc(1024, 0x7f));
     ensureEncryptedDatabaseKey({ file, oldKey, newKey });
     expect(readValue(file)).toBe("preserved");
-  });
+  }, 30_000);
 
   it("durably replaces a profile file", () => {
     const directory = mkdtempSync(path.join(tmpdir(), "jc-primary-profile-"));

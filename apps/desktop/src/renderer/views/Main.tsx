@@ -118,6 +118,7 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
   const [settingsInitialTab, setSettingsInitialTab] = useState<"members" | "connectivity">("members");
   const [legacyChallenge, setLegacyChallenge] = useState<{ invite: string; fingerprint: string } | null>(null);
   const [inviteError, setInviteError] = useState<string | null>(null);
+  const [inviteWarning, setInviteWarning] = useState<string | null>(null);
   const [inviteNotice, setInviteNotice] = useState<string | null>(null);
   const [inviteCopyState, setInviteCopyState] = useState<InviteCopyState>("idle");
   const [inviteFocusPending, setInviteFocusPending] = useState(false);
@@ -565,6 +566,7 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
     setActiveAction("invite");
     setInviteError(null);
     setInviteNotice(null);
+    setInviteWarning(null);
     setInviteKey(null);
     inviteIdRef.current = null;
     setInviteCopyState("idle");
@@ -573,6 +575,7 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
       if (result.ok && result.data) {
         inviteIdRef.current = result.data.inviteId;
         setInviteKey(result.data.inviteKey);
+        setInviteWarning(result.data.warning ?? null);
       }
       else setInviteError(friendlyIpcError(result.error, "Não foi possível criar um convite."));
     } catch (error) {
@@ -966,6 +969,7 @@ export function Main({ identity, recoveryKey }: { identity: { identityId: string
             </div>
           )}
           {inviteError && <p className="mt-2 text-[11px] leading-4 text-red-400" role="alert">{inviteError}</p>}
+          {inviteWarning && <p className="mt-2 text-[11px] leading-4 text-amber-300" role="alert">{inviteWarning}</p>}
           {inviteNotice && <p className="mt-2 text-[11px] leading-4 text-emerald-300" role="status">{inviteNotice}</p>}
         </div>
         <div className="flex-1 overflow-y-auto p-2">

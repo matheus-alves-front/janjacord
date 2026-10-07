@@ -139,6 +139,7 @@ const HINTS = {
   edge_not_found: "O provedor não encontra essa rota no ar (ela ficou órfã na conta). Desligue e ative a rota de novo.",
   edge_backend_down: "O túnel está no ar, mas o servidor da comunidade não respondeu atrás dele. Reabra o JanjaCord.",
   edge_unreachable: "O provedor de túnel não respondeu a tempo. Pode ser instabilidade do provedor ou da rede deste computador.",
+  published_host_mismatch: "A rota publicada está entregando outro host: outra instância do JanjaCord pode estar usando a mesma porta/túnel, ou a share ficou apontada para um processo antigo. Feche a outra instância, desligue e ative a rota de novo, e só então gere um convite novo.",
   ok: "Tudo certo por aqui. Se o convite ainda falha em outro dispositivo, o bloqueio está na rede ou na segurança da máquina de quem entra.",
 };
 
@@ -153,6 +154,7 @@ export async function runConnectivityDoctor({
   probe = probeEdgeDetailed,
   hostLabel = "JanjaNode",
   trustStore = null,
+  verifyPublishedHost = null,
 } = {}) {
   const checks = [];
   const hints = [];
@@ -216,6 +218,20 @@ export async function runConnectivityDoctor({
             : "agente sem nenhuma share",
     });
     if (state === "missing") hints.push(retrying > 0 ? HINTS.agent_share_retrying : HINTS.agent_share_missing);
+    // Shares de ativações anteriores continuam publicadas e servindo URLs antigas: um convite que
+    // carrega uma delas aponta para o host errado quando a porta local muda de dono.
+    const staleShares = routeHost
+      ? shares.filter((share) => share.status === "active" && share.endpoint && !share.endpoint.includes(routeHost))
+      : [];
+    if (staleShares.length > 0) {
+      checks.push({
+        id: "stale_shares",
+        label: "Shares publicadas que não são a rota atual",
+        ok: false,
+        detail: staleShares.map((share) => `${share.endpoint} (token ${share.token})`).join(" · "),
+      });
+      hints.push(`${staleShares.length} share(s) de ativações antigas continuam no ar. Convites que carregam essas URLs não alcançam este host: remova com "zrok2 delete share <token>" ou desligue-as no painel do provedor.`);
+    }
     zombies = shares
       .filter((share) => share.status === "retrying" && !share.endpoint)
       .map((share) => share.token);
@@ -234,6 +250,23 @@ export async function runConnectivityDoctor({
       else if (edge.status === 502 || edge.status === 504) hints.push(HINTS.edge_backend_down);
       else hints.push(HINTS.edge_unreachable);
     }
+  }
+
+  let publishedHost = null;
+  if (route?.endpoint && typeof verifyPublishedHost === "function") {
+    publishedHost = await verifyPublishedHost();
+    const identityMismatch = publishedHost?.identityMismatch === true;
+    checks.push({
+      id: "published_host",
+      label: "Rota publicada entrega este host",
+      ok: publishedHost?.ok === true,
+      detail: publishedHost?.ok === true
+        ? `desafio assinado por este host (${publishedHost.hostId ?? "hostId local indisponível"})`
+        : identityMismatch
+          ? `outro host responde por esta rota (${publishedHost.reason}) · recebido ${publishedHost.hostId ?? publishedHost.hostPublicKey ?? "desconhecido"}`
+          : `não foi possível confirmar o host atrás da rota (${publishedHost?.reason ?? "sem resposta"})`,
+    });
+    if (identityMismatch) hints.push(HINTS.published_host_mismatch);
   }
 
   const failed = checks.filter((check) => !check.ok);
